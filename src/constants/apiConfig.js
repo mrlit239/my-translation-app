@@ -1,5 +1,5 @@
-// Backend API URL - set via environment variable
-export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+// Backend API URL - set via environment variable or use Render deployment
+export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://my-translation-backend.onrender.com';
 
 export const apiProviders = {
     openai: {
