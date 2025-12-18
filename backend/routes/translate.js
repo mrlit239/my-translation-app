@@ -28,6 +28,10 @@ router.post('/:provider', async (req, res) => {
     const { provider } = req.params;
     const { model, messages, prompt, text, stream = false } = req.body;
 
+    // Log incoming request
+    console.log(`[${new Date().toISOString()}] POST /api/translate/${provider}`);
+    console.log(`  Model: ${model}, Text length: ${text?.length || 0} chars`);
+
     try {
         let result;
 
@@ -57,6 +61,7 @@ router.post('/:provider', async (req, res) => {
                 return res.status(400).json({ error: `Unknown provider: ${provider}` });
         }
 
+        console.log(`  ✅ Success: ${result?.length || 0} chars returned`);
         res.json({ translation: result });
 
     } catch (error) {
