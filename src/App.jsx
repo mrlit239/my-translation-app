@@ -800,6 +800,8 @@ export default function TranslationTool() {
         const data = await response.json();
         const fullText = data.translation || '';
 
+        console.log('[Backend Response]', { provider: apiProvider, chars: fullText.length, preview: fullText.slice(0, 100) });
+
         // Simulate streaming for UX (chunk the text)
         if (onChunk && fullText) {
           const sentences = fullText.split(/([.!?。！？\n])/).filter(s => s.trim());
