@@ -1451,31 +1451,20 @@ export default function TranslationTool() {
             }
           }
 
-          // Clear streaming buffer after all chunks
-          setTabs(prev => prev.map(t => {
-            if (t.id !== activeTabId) return t;
-            return { ...t, streamingText: '' };
-          }));
-
-          // If we used real streaming, we need to commit the buffer to outputText
-          if (apiProvider !== 'gemini' && apiProvider !== 'huggingface') {
-            // COMMIT PHASE - Move streaming buffer to main output
+          // COMMIT PHASE - Move accumulated translation to main output
+          if (translation) {
             setTabs(prev => prev.map(t => {
               if (t.id !== activeTabId) return t;
-
-              // Get the text that was streamed (or the fallback translation)
-              // For multi-chunk, streamingText has the accumulated chunks
-              const chunkText = t.streamingText || '';
 
               if (!isLong) {
                 // Append to main output and CLEAR streaming buffer
                 return {
                   ...t,
-                  outputText: (t.outputText || '') + chunkText + '\n\n',
+                  outputText: (t.outputText || '') + translation + '\n\n',
                   streamingText: ''
                 };
               } else {
-                return { ...t, tempTranslation: chunkText }; // tempTranslation is already the buffer for long mode
+                return { ...t, tempTranslation: translation, streamingText: '' };
               }
             }));
 
