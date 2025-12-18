@@ -6,7 +6,8 @@ export const apiProviders = {
         name: 'OpenAI',
         models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
         endpoint: 'https://api.openai.com/v1/chat/completions',
-        useBackend: true  // Use backend (server-side API key)
+        requiresKey: true,
+        useBackend: false  // Direct browser call
     },
     gemini: {
         name: 'Google Gemini',
@@ -15,7 +16,8 @@ export const apiProviders = {
             'gemini-2.5-flash'
         ],
         endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/',
-        useBackend: true  // Use backend (server-side API key)
+        requiresKey: true,
+        useBackend: false  // Direct browser call
     },
     deepseek: {
         name: 'DeepSeek',
@@ -58,7 +60,8 @@ export const apiProviders = {
         ],
         defaultModel: 'grok-4-1-fast-non-reasoning',
         endpoint: 'https://api.x.ai/v1/chat/completions',
-        useBackend: true,  // Use backend (server-side API key)
+        requiresKey: true,
+        useBackend: false,  // Direct browser call - works fine without proxy
         supportsCache: true,
         supportsTools: true
     },
@@ -70,7 +73,8 @@ export const apiProviders = {
         ],
         defaultModel: 'llama-3.3-70b-versatile',
         endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-        useBackend: true  // Use backend (server-side API key)
+        requiresKey: true,
+        useBackend: false  // Direct browser call
     },
     local: {
         name: 'Local (LM Studio/Ollama)',
