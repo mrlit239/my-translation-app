@@ -26,5 +26,10 @@ dist-ssr
 api_key.txt
 *api_key*
 
+# Environment files - NEVER COMMIT THESE
+.env
+.env.*
+*.env
+backend/.env
 # Local Netlify folder
 .netlify
