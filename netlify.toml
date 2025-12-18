@@ -2,11 +2,6 @@
   publish = "dist"
   command = "npm run build"
 
-[functions]
-  # Extend function timeout to 26 seconds (max for free tier)
-  # Background functions can go up to 15 minutes but require Pro plan
-  timeout = 26
-
 # Redirect for SPA routing
 [[redirects]]
   from = "/*"
