@@ -822,14 +822,11 @@ export default function TranslationTool() {
 
         console.log('[Backend Response]', { provider: apiProvider, chars: fullText.length, preview: fullText.slice(0, 100) });
 
-        // Simulate streaming for UX (chunk the text)
+        // Simulate streaming for UX - preserve all whitespace/newlines
         if (onChunk && fullText) {
-          const sentences = fullText.split(/([.!?。！？\n])/).filter(s => s.trim());
-          for (let i = 0; i < sentences.length; i++) {
-            if (signal.aborted) break;
-            onChunk(sentences[i]);
-            await new Promise(resolve => setTimeout(resolve, 50));
-          }
+          // Just send the whole text at once to preserve formatting
+          // The backend already returns complete response, no need to chunk
+          onChunk(fullText);
         }
 
         return fullText;
