@@ -212,6 +212,21 @@ export default function TranslationTool() {
     }
   }, [apiProvider, model]);
 
+  // WAKE UP BACKEND ON APP LOAD (Render free tier sleeps after 15min)
+  useEffect(() => {
+    const wakeUpBackend = async () => {
+      try {
+        console.log('[Backend] Waking up server...');
+        const start = Date.now();
+        await fetch(`${BACKEND_URL}/health`);
+        console.log(`[Backend] Server ready in ${Date.now() - start}ms`);
+      } catch (e) {
+        console.log('[Backend] Wake-up ping failed:', e.message);
+      }
+    };
+    wakeUpBackend();
+  }, []);
+
   // Handle visibility change - prevent throttling when tab is hidden
   useEffect(() => {
     const handleVisibilityChange = () => {
