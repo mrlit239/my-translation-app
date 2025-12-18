@@ -800,12 +800,17 @@ export default function TranslationTool() {
         const data = await response.json();
         const fullText = data.translation || '';
 
-        // Simulate streaming for UX
+        // Simulate streaming for UX (chunk the text)
         if (onChunk && fullText) {
-          await simulateStreaming(fullText, onChunk, signal);
+          const sentences = fullText.split(/([.!?。！？\n])/).filter(s => s.trim());
+          for (let i = 0; i < sentences.length; i++) {
+            if (signal.aborted) break;
+            onChunk(sentences[i]);
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
         }
 
-        return processGlossary(fullText);
+        return fullText;
       } catch (error) {
         if (error.name === 'AbortError') throw error;
         throw new Error(`Backend: ${error.message}`);
