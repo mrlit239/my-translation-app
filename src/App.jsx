@@ -796,6 +796,9 @@ export default function TranslationTool() {
     // ────────────────────── BACKEND API CALL (Server-side keys) ──────────────────────
     if (provider?.useBackend) {
       try {
+        console.log('[Backend] Starting request to:', `${BACKEND_URL}/api/translate/${apiProvider}`);
+        console.log('[Backend] Request payload size:', text?.length, 'chars');
+
         const response = await fetch(`${BACKEND_URL}/api/translate/${apiProvider}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -806,6 +809,8 @@ export default function TranslationTool() {
           }),
           signal
         });
+
+        console.log('[Backend] Response status:', response.status);
 
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
