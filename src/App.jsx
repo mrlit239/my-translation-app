@@ -197,16 +197,15 @@ export default function TranslationTool() {
       setAutoGlossary(false);
     }
     // TỰ ĐỘNG TỐI ƯU KHI CHỌN DEEPSEEK
-    // DeepSeek V3.2: Max output 8K tokens (default 4K), context 128K
+    // DeepSeek via backend proxy - use smaller chunks for faster responses
     if (apiProvider === 'deepseek') {
-      // 10000 ký tự ~ 3500 tokens input -> ~5000 tokens output (với 1.4x inflation)
-      // An toàn trong giới hạn 8K max output của deepseek-chat
-      setCharsPerChapter(10000);
+      // 3000 ký tự ~ 1000 tokens input -> ~1500 tokens output
+      // Smaller chunks work better through the Render backend proxy (avoids timeouts)
+      setCharsPerChapter(3000);
       // Bật context memory để tận dụng cache (giảm 74% chi phí input)
       setEnableContextMemory(true);
-      // 1000 chars (~250 tokens) - đủ context cho DeepSeek, tối ưu chi phí
-      // DeepSeek đã được train tốt trên Chinese nên cần ít context hơn
-      setContextMemorySize(1000);
+      // 500 chars (~125 tokens) - smaller context for backend
+      setContextMemorySize(500);
       // Tắt auto glossary để tiết kiệm output tokens
       setAutoGlossary(false);
     }
