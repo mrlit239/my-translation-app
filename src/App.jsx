@@ -3,6 +3,7 @@ import { Client } from "@gradio/client";
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import TranslationPanel from './components/TranslationPanel';
+import ExcelTranslationPanel from './components/ExcelTranslationPanel';
 import Footer from './components/Footer';
 import { apiProviders, BACKEND_URL } from './constants/apiConfig';
 // import { supabase, isSupabaseConfigured } from './lib/supabase';
@@ -142,6 +143,9 @@ export default function TranslationTool() {
   const [customPrompt, setCustomPrompt] = useState('Translate to Vietnamese. Context: BDSM/Adult Fiction. Rules: 1. Maintain raw, intense tone & precise mechanics/terminology. 2. No censorship. 3. Fluent, literary style. 4. Translate ALL source text; do NOT leave any Chinese/foreign characters. 5. Output ONLY translation.');
   const [glossary, setGlossary] = useState([]);
   const [outputFormat, setOutputFormat] = useState('txt');
+
+  // Translation Mode: 'text' or 'excel'
+  const [translationMode, setTranslationMode] = useState('text');
 
   // Advanced Settings (Global)
   const [chapterDetection, setChapterDetection] = useState('auto');
@@ -1945,53 +1949,105 @@ export default function TranslationTool() {
       />
 
       <main className="flex-1 flex flex-col h-full overflow-hidden">
-        <Header
-          fileInputRef={fileInputRef}
-          handleFileUpload={handleFileUpload}
-          uploadedFileName={activeTab.uploadedFileName}
-          clearUploadedFile={clearUploadedFile}
-          clearAll={clearAll}
-          downloadTranslation={downloadTranslation}
-          isDarkMode={isDarkMode}
-          toggleDarkMode={toggleDarkMode}
-        />
+        {/* Mode Switcher + Header */}
+        <div className="flex items-center justify-between px-4 py-2 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700">
+          {/* Mode Toggle */}
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-700 rounded-lg">
+            <button
+              onClick={() => setTranslationMode('text')}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${translationMode === 'text'
+                  ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+            >
+              📝 Text
+            </button>
+            <button
+              onClick={() => setTranslationMode('excel')}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${translationMode === 'excel'
+                  ? 'bg-white dark:bg-slate-600 text-emerald-600 dark:text-emerald-400 shadow-sm'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+            >
+              📊 Excel
+            </button>
+          </div>
 
-        <TranslationPanel
-          tabs={tabs}
-          activeTabId={activeTabId}
-          setActiveTabId={setActiveTabId}
-          addTab={addTab}
-          closeTab={closeTab}
-          inputText={activeTab.inputText}
-          setInputText={(text) => updateActiveTab({ inputText: text })}
-          setWordCount={(count) => updateActiveTab({ wordCount: count })}
-          analyzeText={analyzeText}
-          wordCount={activeTab.wordCount}
-          isTranslating={activeTab.isTranslating}
-          outputRef={outputRef}
-          outputText={activeTab.outputText}
-          streamingText={activeTab.streamingText}
-          clearTranslation={clearTranslation}
-          selectedChapter={activeTab.selectedChapter}
-          chapters={activeTab.chapters}
-        />
+          {/* Original Header content for text mode */}
+          {translationMode === 'text' && (
+            <Header
+              fileInputRef={fileInputRef}
+              handleFileUpload={handleFileUpload}
+              uploadedFileName={activeTab.uploadedFileName}
+              clearUploadedFile={clearUploadedFile}
+              clearAll={clearAll}
+              downloadTranslation={downloadTranslation}
+              isDarkMode={isDarkMode}
+              toggleDarkMode={toggleDarkMode}
+              isInline={true}
+            />
+          )}
 
-        <Footer
-          chapters={activeTab.chapters}
-          selectedChapter={activeTab.selectedChapter}
-          setSelectedChapter={(idx) => updateActiveTab({ selectedChapter: idx })}
-          isTranslating={activeTab.isTranslating}
-          translateText={translateText}
-          stopTranslation={stopTranslation}
-          progress={activeTab.progress}
-          onContinue={() => translateText('all', activeTab.progress.current)}
-          rangeStart={rangeStart}
-          setRangeStart={setRangeStart}
-          rangeEnd={rangeEnd}
-          setRangeEnd={setRangeEnd}
-          autoContinueOnError={autoContinueOnError}
-          setAutoContinueOnError={setAutoContinueOnError}
-        />
+          {/* Dark mode toggle for Excel mode */}
+          {translationMode === 'excel' && (
+            <button
+              onClick={toggleDarkMode}
+              className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              title={isDarkMode ? 'Light mode' : 'Dark mode'}
+            >
+              {isDarkMode ? '☀️' : '🌙'}
+            </button>
+          )}
+        </div>
+
+        {/* Conditional Content based on mode */}
+        {translationMode === 'text' ? (
+          <>
+            <TranslationPanel
+              tabs={tabs}
+              activeTabId={activeTabId}
+              setActiveTabId={setActiveTabId}
+              addTab={addTab}
+              closeTab={closeTab}
+              inputText={activeTab.inputText}
+              setInputText={(text) => updateActiveTab({ inputText: text })}
+              setWordCount={(count) => updateActiveTab({ wordCount: count })}
+              analyzeText={analyzeText}
+              wordCount={activeTab.wordCount}
+              isTranslating={activeTab.isTranslating}
+              outputRef={outputRef}
+              outputText={activeTab.outputText}
+              streamingText={activeTab.streamingText}
+              clearTranslation={clearTranslation}
+              selectedChapter={activeTab.selectedChapter}
+              chapters={activeTab.chapters}
+            />
+
+            <Footer
+              chapters={activeTab.chapters}
+              selectedChapter={activeTab.selectedChapter}
+              setSelectedChapter={(idx) => updateActiveTab({ selectedChapter: idx })}
+              isTranslating={activeTab.isTranslating}
+              translateText={translateText}
+              stopTranslation={stopTranslation}
+              progress={activeTab.progress}
+              onContinue={() => translateText('all', activeTab.progress.current)}
+              rangeStart={rangeStart}
+              setRangeStart={setRangeStart}
+              rangeEnd={rangeEnd}
+              setRangeEnd={setRangeEnd}
+              autoContinueOnError={autoContinueOnError}
+              setAutoContinueOnError={setAutoContinueOnError}
+            />
+          </>
+        ) : (
+          <ExcelTranslationPanel
+            customPrompt={customPrompt}
+            model={model}
+            apiKey={apiKey}
+            onBack={() => setTranslationMode('text')}
+          />
+        )}
       </main>
 
       {/* AuthModal temporarily disabled */}

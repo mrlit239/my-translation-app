@@ -2,7 +2,7 @@ import express from 'express';
 import { translateWithOpenAI } from '../services/openai.js';
 import { translateWithDeepSeek } from '../services/deepseek.js';
 import { translateWithGrok } from '../services/grok.js';
-import { translateWithGemini } from '../services/gemini.js';
+import { translateWithGemini, translateImageWithGemini } from '../services/gemini.js';
 import { translateWithAnthropic } from '../services/anthropic.js';
 import { translateWithGroq } from '../services/groq.js';
 import { translateWithOpenRouter } from '../services/openrouter.js';
@@ -21,6 +21,23 @@ router.get('/providers', (req, res) => {
         openrouter: { available: !!process.env.OPENROUTER_API_KEY, models: ['qwen/qwen-2.5-32b-instruct'] }
     };
     res.json(providers);
+});
+
+// Gemini Vision endpoint for image translation
+router.post('/gemini-vision', async (req, res) => {
+    const { model, prompt, imageBase64, mimeType } = req.body;
+
+    console.log(`[${new Date().toISOString()}] POST /api/translate/gemini-vision`);
+    console.log(`  Model: ${model}, Image size: ${imageBase64?.length || 0} chars (base64)`);
+
+    try {
+        const result = await translateImageWithGemini(model, prompt, imageBase64, mimeType);
+        console.log(`  ✅ Vision success: hasText=${result.hasText}, extracted=${result.extractedText?.length || 0} chars`);
+        res.json(result);
+    } catch (error) {
+        console.error('[gemini-vision] Error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Unified translate endpoint
@@ -71,3 +88,4 @@ router.post('/:provider', async (req, res) => {
 });
 
 export default router;
+
