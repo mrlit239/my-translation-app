@@ -12,6 +12,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.cell.cell import Cell
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -50,6 +51,12 @@ def extract_translatable_cells(wb) -> list:
     
     for sheet_name in wb.sheetnames:
         sheet = wb[sheet_name]
+        
+        # Skip non-worksheet sheets (Chartsheet, etc.)
+        if not isinstance(sheet, Worksheet):
+            print(f"Skipping non-worksheet: {sheet_name} (type: {type(sheet).__name__})")
+            continue
+        
         for row in sheet.iter_rows():
             for cell in row:
                 if cell.value and isinstance(cell.value, str) and has_translatable_text(cell.value):

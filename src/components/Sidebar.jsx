@@ -17,6 +17,9 @@ export default function Sidebar({
     setCharsPerChapter,
     customPrompt,
     setCustomPrompt,
+    excelPrompt,
+    setExcelPrompt,
+    translationMode,
     glossary,
     setGlossary,
     enableContextMemory,
@@ -29,6 +32,10 @@ export default function Sidebar({
     onLoginClick,
     onLogoutClick
 }) {
+    // Determine which prompt to show based on mode
+    const currentPrompt = translationMode === 'excel' ? excelPrompt : customPrompt;
+    const setCurrentPrompt = translationMode === 'excel' ? setExcelPrompt : setCustomPrompt;
+    const promptLabel = translationMode === 'excel' ? 'Excel Prompt' : 'Custom Prompt';
     return (
         <aside className="w-80 bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700 flex flex-col shadow-sm z-10 transition-colors duration-200">
             <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center gap-3">
@@ -236,13 +243,18 @@ export default function Sidebar({
                         </div>
 
                         <div>
-                            <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 block">Custom Prompt</label>
+                            <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-2">
+                                {promptLabel}
+                                {translationMode === 'excel' && (
+                                    <span className="text-xs bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded">Excel Mode</span>
+                                )}
+                            </label>
                             <textarea
-                                value={customPrompt}
-                                onChange={(e) => setCustomPrompt(e.target.value)}
+                                value={currentPrompt || ''}
+                                onChange={(e) => setCurrentPrompt && setCurrentPrompt(e.target.value)}
                                 rows={3}
                                 className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-none text-slate-900 dark:text-slate-200"
-                                placeholder="Enter custom instructions..."
+                                placeholder={translationMode === 'excel' ? 'Enter Excel translation instructions...' : 'Enter custom instructions...'}
                             />
                         </div>
                     </div>

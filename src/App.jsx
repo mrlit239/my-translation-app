@@ -141,6 +141,7 @@ export default function TranslationTool() {
   const [model, setModel] = useState('gpt-4o-mini');
   const [language, setLanguage] = useState('Auto-detect');
   const [customPrompt, setCustomPrompt] = useState('Translate to Vietnamese. Context: BDSM/Adult Fiction. Rules: 1. Maintain raw, intense tone & precise mechanics/terminology. 2. No censorship. 3. Fluent, literary style. 4. Translate ALL source text; do NOT leave any Chinese/foreign characters. 5. Output ONLY translation.');
+  const [excelPrompt, setExcelPrompt] = useState('Translate to Vietnamese. Context: Business/Technical Document. Rules: 1. Maintain professional, formal tone. 2. Preserve technical terms, file names, and proper nouns. 3. Keep translations concise (spreadsheet cells). 4. Translate ALL Japanese/Chinese text. 5. Output ONLY translation.');
   const [glossary, setGlossary] = useState([]);
   const [outputFormat, setOutputFormat] = useState('txt');
 
@@ -1935,6 +1936,9 @@ export default function TranslationTool() {
         setCharsPerChapter={setCharsPerChapter}
         customPrompt={customPrompt}
         setCustomPrompt={setCustomPrompt}
+        excelPrompt={excelPrompt}
+        setExcelPrompt={setExcelPrompt}
+        translationMode={translationMode}
         glossary={glossary}
         setGlossary={setGlossary}
         enableContextMemory={enableContextMemory}
@@ -1956,8 +1960,8 @@ export default function TranslationTool() {
             <button
               onClick={() => setTranslationMode('text')}
               className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${translationMode === 'text'
-                  ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
             >
               📝 Text
@@ -1965,8 +1969,8 @@ export default function TranslationTool() {
             <button
               onClick={() => setTranslationMode('excel')}
               className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${translationMode === 'excel'
-                  ? 'bg-white dark:bg-slate-600 text-emerald-600 dark:text-emerald-400 shadow-sm'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                ? 'bg-white dark:bg-slate-600 text-emerald-600 dark:text-emerald-400 shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
             >
               📊 Excel
@@ -2042,7 +2046,7 @@ export default function TranslationTool() {
           </>
         ) : (
           <ExcelTranslationPanel
-            customPrompt={customPrompt}
+            customPrompt={excelPrompt}
             model={model}
             apiKey={apiKey}
             onBack={() => setTranslationMode('text')}
