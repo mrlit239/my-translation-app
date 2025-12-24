@@ -13,12 +13,13 @@ export default function ExcelTranslationPanel({
     // State
     const [file, setFile] = useState(null);
     const [isTranslating, setIsTranslating] = useState(false);
-    const [progress, setProgress] = useState('');
+    const [progress, setProgress] = useState({ current: 0, total: 0, percent: 0, batch: 0, sample: '' });
     const [translatedBlob, setTranslatedBlob] = useState(null);
     const [error, setError] = useState('');
+    const [statusMessage, setStatusMessage] = useState('');
 
     const fileInputRef = useRef(null);
-    const dropZoneRef = useRef(null);
+    const abortControllerRef = useRef(null);
 
     // Handle file drop
     const handleDrop = useCallback((e) => {
@@ -29,6 +30,7 @@ export default function ExcelTranslationPanel({
             setFile(droppedFile);
             setTranslatedBlob(null);
             setError('');
+            setProgress({ current: 0, total: 0, percent: 0, batch: 0, sample: '' });
         } else {
             setError('Please upload an Excel file (.xlsx or .xls)');
         }
@@ -45,28 +47,32 @@ export default function ExcelTranslationPanel({
             setFile(selectedFile);
             setTranslatedBlob(null);
             setError('');
+            setProgress({ current: 0, total: 0, percent: 0, batch: 0, sample: '' });
         }
     };
 
-    // Translate the file using Python service
+    // Translate with streaming progress
     const translateFile = async () => {
         if (!file) return;
 
         setIsTranslating(true);
         setError('');
-        setProgress('Uploading file to translation service...');
+        setStatusMessage('Uploading file...');
+        setProgress({ current: 0, total: 0, percent: 0, batch: 0, sample: '' });
+
+        abortControllerRef.current = new AbortController();
 
         try {
             const formData = new FormData();
             formData.append('file', file);
-            formData.append('prompt', customPrompt || 'Translate the following Japanese/Chinese text to Vietnamese. Maintain professional tone.');
+            formData.append('prompt', customPrompt || 'Translate Japanese/Chinese to Vietnamese. Professional tone.');
             formData.append('model', model || 'gemini-2.0-flash');
+            formData.append('api_key', apiKey || '');
 
-            setProgress('Translating... This may take a minute for large files.');
-
-            const response = await fetch(`${PYTHON_EXCEL_URL}/translate-excel`, {
+            const response = await fetch(`${PYTHON_EXCEL_URL}/translate-excel-stream`, {
                 method: 'POST',
-                body: formData
+                body: formData,
+                signal: abortControllerRef.current.signal
             });
 
             if (!response.ok) {
@@ -74,17 +80,76 @@ export default function ExcelTranslationPanel({
                 throw new Error(errorData.detail || 'Translation failed');
             }
 
-            // Get the translated file as blob
-            const blob = await response.blob();
-            setTranslatedBlob(blob);
-            setProgress('Translation complete!');
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+
+                    try {
+                        const data = JSON.parse(line);
+
+                        if (data.type === 'start') {
+                            setStatusMessage(`Found ${data.total} cells to translate in ${data.sheets.length} sheets`);
+                        } else if (data.type === 'progress') {
+                            setProgress({
+                                current: data.current,
+                                total: data.total,
+                                percent: data.percent,
+                                batch: data.batch,
+                                sample: data.sample
+                            });
+                            setStatusMessage(`Translating: ${data.current}/${data.total} cells (${data.percent}%)`);
+                        } else if (data.type === 'info') {
+                            setStatusMessage(data.message);
+                        } else if (data.type === 'complete') {
+                            // Decode base64 and create blob
+                            const binaryString = atob(data.data);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let i = 0; i < binaryString.length; i++) {
+                                bytes[i] = binaryString.charCodeAt(i);
+                            }
+                            const blob = new Blob([bytes], {
+                                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                            });
+                            setTranslatedBlob(blob);
+                            setStatusMessage('Translation complete!');
+                            setProgress(prev => ({ ...prev, percent: 100 }));
+                        } else if (data.type === 'error') {
+                            throw new Error(data.message);
+                        }
+                    } catch (parseError) {
+                        console.warn('Failed to parse progress line:', line);
+                    }
+                }
+            }
 
         } catch (err) {
-            console.error('Translation error:', err);
-            setError(`Translation error: ${err.message}. Make sure the Python service is running.`);
-            setProgress('');
+            if (err.name === 'AbortError') {
+                setStatusMessage('Translation cancelled');
+            } else {
+                console.error('Translation error:', err);
+                setError(`Translation error: ${err.message}`);
+            }
         } finally {
             setIsTranslating(false);
+            abortControllerRef.current = null;
+        }
+    };
+
+    // Cancel translation
+    const cancelTranslation = () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
         }
     };
 
@@ -104,10 +169,12 @@ export default function ExcelTranslationPanel({
 
     // Clear all
     const clearAll = () => {
+        cancelTranslation();
         setFile(null);
         setTranslatedBlob(null);
         setError('');
-        setProgress('');
+        setStatusMessage('');
+        setProgress({ current: 0, total: 0, percent: 0, batch: 0, sample: '' });
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
@@ -157,7 +224,6 @@ export default function ExcelTranslationPanel({
                 {/* Upload Zone */}
                 {!file && (
                     <div
-                        ref={dropZoneRef}
                         onDrop={handleDrop}
                         onDragOver={handleDragOver}
                         className="border-2 border-dashed border-slate-300 dark:border-slate-600 rounded-xl p-12 text-center hover:border-emerald-500 dark:hover:border-emerald-400 transition-colors cursor-pointer bg-white dark:bg-slate-800"
@@ -180,7 +246,7 @@ export default function ExcelTranslationPanel({
                         <div className="flex flex-wrap justify-center gap-2 text-xs text-slate-400">
                             <span className="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">✓ Images preserved</span>
                             <span className="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">✓ Charts preserved</span>
-                            <span className="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">✓ Formatting preserved</span>
+                            <span className="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">✓ Real-time progress</span>
                         </div>
                     </div>
                 )}
@@ -188,9 +254,9 @@ export default function ExcelTranslationPanel({
                 {/* File Loaded */}
                 {file && (
                     <div className="space-y-6">
-                        {/* File Info & Actions */}
+                        {/* File Info Card */}
                         <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
-                            <div className="flex items-center justify-between flex-wrap gap-4">
+                            <div className="flex items-center justify-between flex-wrap gap-4 mb-4">
                                 <div className="flex items-center gap-4">
                                     <div className="p-3 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg">
                                         <FileSpreadsheet className="w-8 h-8 text-emerald-600 dark:text-emerald-400" />
@@ -204,23 +270,22 @@ export default function ExcelTranslationPanel({
                                 </div>
 
                                 <div className="flex items-center gap-3">
-                                    {!translatedBlob && (
+                                    {!translatedBlob && !isTranslating && (
                                         <button
                                             onClick={translateFile}
-                                            disabled={isTranslating}
-                                            className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                                            className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
                                         >
-                                            {isTranslating ? (
-                                                <>
-                                                    <Loader2 className="w-5 h-5 animate-spin" />
-                                                    Translating...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <Languages className="w-5 h-5" />
-                                                    Translate File
-                                                </>
-                                            )}
+                                            <Languages className="w-5 h-5" />
+                                            Translate File
+                                        </button>
+                                    )}
+
+                                    {isTranslating && (
+                                        <button
+                                            onClick={cancelTranslation}
+                                            className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors"
+                                        >
+                                            Cancel
                                         </button>
                                     )}
 
@@ -236,14 +301,34 @@ export default function ExcelTranslationPanel({
                                 </div>
                             </div>
 
-                            {/* Progress */}
-                            {progress && (
-                                <div className="mt-4 p-3 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                                    <p className={`text-sm ${translatedBlob ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-600 dark:text-slate-400'}`}>
-                                        {translatedBlob && <CheckCircle className="w-4 h-4 inline mr-2" />}
-                                        {isTranslating && <Loader2 className="w-4 h-4 inline mr-2 animate-spin" />}
-                                        {progress}
-                                    </p>
+                            {/* Progress Bar */}
+                            {(isTranslating || progress.percent > 0) && (
+                                <div className="mt-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                                            {statusMessage}
+                                        </span>
+                                        <span className="text-sm text-slate-500 dark:text-slate-400">
+                                            {progress.percent}%
+                                        </span>
+                                    </div>
+                                    <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-3 overflow-hidden">
+                                        <div
+                                            className={`h-full rounded-full transition-all duration-300 ${translatedBlob
+                                                    ? 'bg-emerald-500'
+                                                    : 'bg-indigo-500 animate-pulse'
+                                                }`}
+                                            style={{ width: `${progress.percent}%` }}
+                                        />
+                                    </div>
+                                    {progress.total > 0 && (
+                                        <div className="mt-2 text-xs text-slate-500 dark:text-slate-400 flex justify-between">
+                                            <span>Batch {progress.batch} • {progress.current} of {progress.total} cells</span>
+                                            {progress.sample && (
+                                                <span className="italic truncate max-w-[200px]">"{progress.sample}..."</span>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -256,7 +341,7 @@ export default function ExcelTranslationPanel({
                                     Translation Complete!
                                 </h3>
                                 <p className="text-emerald-700 dark:text-emerald-400 mb-4">
-                                    Your file has been translated. All images, charts, and formatting are preserved.
+                                    {progress.total} cells translated. All images, charts, and formatting are preserved.
                                 </p>
                                 <button
                                     onClick={downloadTranslatedFile}
@@ -271,9 +356,9 @@ export default function ExcelTranslationPanel({
                         {/* Info */}
                         <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
                             <p className="text-sm text-blue-700 dark:text-blue-300">
-                                <strong>ℹ️ How it works:</strong> Your file is sent to our Python service which uses <code>openpyxl</code> to
-                                read and modify the Excel file while preserving all images, charts, tables, and formatting.
-                                Only Japanese/Chinese text cells are translated.
+                                <strong>ℹ️ How it works:</strong> Your file is processed with <code>openpyxl</code> which
+                                preserves images, charts, and formatting. Only Japanese/Chinese text cells are translated.
+                                Progress updates in real-time.
                             </p>
                         </div>
                     </div>

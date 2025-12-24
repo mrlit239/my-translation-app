@@ -1,12 +1,13 @@
 """
-Excel Translation Service
+Excel Translation Service with Streaming Progress
 Translates Excel files while preserving images, charts, and formatting using openpyxl
 """
 
 import os
 import io
 import re
-import tempfile
+import json
+import asyncio
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,7 +41,6 @@ def has_translatable_text(text: str) -> bool:
     """Check if text contains Japanese or Chinese characters"""
     if not text or not isinstance(text, str):
         return False
-    # Japanese Hiragana, Katakana, Kanji, and Chinese characters
     pattern = r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\u3400-\u4DBF]'
     return bool(re.search(pattern, text))
 
@@ -52,9 +52,8 @@ def extract_translatable_cells(wb) -> list:
     for sheet_name in wb.sheetnames:
         sheet = wb[sheet_name]
         
-        # Skip non-worksheet sheets (Chartsheet, etc.)
         if not isinstance(sheet, Worksheet):
-            print(f"Skipping non-worksheet: {sheet_name} (type: {type(sheet).__name__})")
+            print(f"Skipping non-worksheet: {sheet_name}")
             continue
         
         for row in sheet.iter_rows():
@@ -63,19 +62,20 @@ def extract_translatable_cells(wb) -> list:
                     cells.append({
                         'sheet': sheet_name,
                         'coord': cell.coordinate,
-                        'value': cell.value,
-                        'cell': cell
+                        'value': cell.value
                     })
     
     return cells
 
 
-async def translate_batch(texts: list, prompt: str, model_name: str = "gemini-2.0-flash") -> dict:
-    """Translate a batch of texts using Gemini"""
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+def translate_batch_sync(texts: list, prompt: str, model_name: str, api_key: str) -> dict:
+    """Translate a batch of texts using Gemini (synchronous)"""
+    key_to_use = api_key or GEMINI_API_KEY
+    if not key_to_use:
+        return {}
     
-    # Format texts with markers
+    genai.configure(api_key=key_to_use)
+    
     batch_text = "\n".join([f"【{i}】{text}" for i, text in enumerate(texts)])
     
     full_prompt = f"""{prompt}
@@ -85,9 +85,9 @@ EXCEL CELL TRANSLATION RULES:
 - Translate each cell and KEEP the 【number】 markers
 - Keep translations concise (spreadsheet cells)
 - Preserve numbers, dates, file names
-- Output format: 【0】translation【1】translation...
+- Output: 【0】translation【1】translation...
 
-Text to translate:
+Text:
 {batch_text}"""
     
     try:
@@ -95,7 +95,6 @@ Text to translate:
         response = model.generate_content(full_prompt)
         result_text = response.text
         
-        # Parse translations
         pattern = r'【(\d+)】([^【]*)'
         matches = re.findall(pattern, result_text)
         
@@ -105,7 +104,7 @@ Text to translate:
         
         return translations
     except Exception as e:
-        print(f"Translation error: {e}")
+        print(f"[ERROR] Translation error: {e}")
         return {}
 
 
@@ -114,71 +113,146 @@ async def health():
     return {"status": "ok", "service": "excel-translation"}
 
 
-@app.post("/translate-excel")
-async def translate_excel(
+@app.post("/translate-excel-stream")
+async def translate_excel_stream(
     file: UploadFile = File(...),
-    prompt: str = Form(default="Translate the following Japanese/Chinese text to Vietnamese. Maintain professional tone."),
-    model: str = Form(default="gemini-2.0-flash")
+    prompt: str = Form(default="Translate Japanese/Chinese to Vietnamese. Professional tone."),
+    model: str = Form(default="gemini-2.0-flash"),
+    api_key: str = Form(default="")
 ):
     """
-    Upload an Excel file, translate text cells, return the translated file.
-    Preserves all images, charts, formatting.
+    Translate Excel with Server-Sent Events progress updates.
+    Returns NDJSON stream with progress, then final file as base64.
     """
     if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="Please upload an Excel file (.xlsx or .xls)")
+        raise HTTPException(status_code=400, detail="Please upload an Excel file")
     
-    try:
-        # Read uploaded file
-        content = await file.read()
-        
-        # Load workbook with openpyxl (preserves everything)
-        wb = load_workbook(io.BytesIO(content))
-        
-        # Extract translatable cells
-        cells = extract_translatable_cells(wb)
-        
-        if not cells:
-            # No cells to translate, return original
+    content = await file.read()
+    
+    async def generate():
+        try:
+            # Load workbook
+            wb = load_workbook(io.BytesIO(content))
+            cells = extract_translatable_cells(wb)
+            total_cells = len(cells)
+            
+            yield json.dumps({"type": "start", "total": total_cells, "sheets": wb.sheetnames}) + "\n"
+            
+            if not cells:
+                yield json.dumps({"type": "info", "message": "No translatable cells found"}) + "\n"
+            else:
+                # Batch translate with progress
+                batch_size = 10
+                translated_count = 0
+                
+                for i in range(0, len(cells), batch_size):
+                    batch = cells[i:i + batch_size]
+                    texts = [c['value'] for c in batch]
+                    
+                    # Translate this batch
+                    translations = translate_batch_sync(texts, prompt, model, api_key)
+                    
+                    # Apply translations
+                    for j, cell_info in enumerate(batch):
+                        if j in translations:
+                            sheet = wb[cell_info['sheet']]
+                            sheet[cell_info['coord']] = translations[j]
+                    
+                    translated_count += len(batch)
+                    percent = int((translated_count / total_cells) * 100)
+                    
+                    yield json.dumps({
+                        "type": "progress",
+                        "current": translated_count,
+                        "total": total_cells,
+                        "percent": percent,
+                        "batch": i // batch_size + 1,
+                        "sample": translations.get(0, "")[:30] if translations else ""
+                    }) + "\n"
+                    
+                    # Small delay to prevent overwhelming
+                    await asyncio.sleep(0.1)
+            
+            # Save workbook
             output = io.BytesIO()
             wb.save(output)
             output.seek(0)
             
-            return StreamingResponse(
-                output,
-                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={"Content-Disposition": f"attachment; filename={file.filename.replace('.xlsx', '_translated.xlsx')}"}
-            )
-        
-        # Batch translate (groups of 15 cells)
-        batch_size = 15
-        for i in range(0, len(cells), batch_size):
-            batch = cells[i:i + batch_size]
-            texts = [c['value'] for c in batch]
+            # Encode as base64
+            import base64
+            file_data = base64.b64encode(output.read()).decode('utf-8')
             
-            translations = await translate_batch(texts, prompt, model)
+            from urllib.parse import quote
+            filename = file.filename.replace('.xlsx', '_translated.xlsx')
             
-            # Apply translations to cells
-            for j, cell_info in enumerate(batch):
-                if j in translations:
-                    sheet = wb[cell_info['sheet']]
-                    sheet[cell_info['coord']] = translations[j]
+            yield json.dumps({
+                "type": "complete",
+                "filename": filename,
+                "data": file_data
+            }) + "\n"
+            
+        except Exception as e:
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"X-Content-Type-Options": "nosniff"}
+    )
+
+
+# Keep the old endpoint for backwards compatibility
+@app.post("/translate-excel")
+async def translate_excel(
+    file: UploadFile = File(...),
+    prompt: str = Form(default="Translate Japanese/Chinese to Vietnamese. Professional tone."),
+    model: str = Form(default="gemini-2.0-flash"),
+    api_key: str = Form(default="")
+):
+    """Non-streaming version for compatibility"""
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=400, detail="Please upload an Excel file")
+    
+    try:
+        content = await file.read()
+        wb = load_workbook(io.BytesIO(content))
+        cells = extract_translatable_cells(wb)
         
-        # Save to BytesIO
+        print(f"[DEBUG] Found {len(cells)} cells to translate")
+        
+        if cells:
+            batch_size = 10
+            for i in range(0, len(cells), batch_size):
+                batch = cells[i:i + batch_size]
+                texts = [c['value'] for c in batch]
+                
+                print(f"[DEBUG] Translating batch {i//batch_size + 1}/{(len(cells)-1)//batch_size + 1}")
+                
+                translations = translate_batch_sync(texts, prompt, model, api_key)
+                
+                for j, cell_info in enumerate(batch):
+                    if j in translations:
+                        sheet = wb[cell_info['sheet']]
+                        sheet[cell_info['coord']] = translations[j]
+        
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
         
-        # Return translated file
-        translated_filename = file.filename.replace('.xlsx', '_translated.xlsx').replace('.xls', '_translated.xls')
+        from urllib.parse import quote
+        filename = quote(file.filename.replace('.xlsx', '_translated.xlsx'))
+        
+        print(f"[DEBUG] Translation complete! Sending file.")
         
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={translated_filename}"}
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        print(f"[ERROR] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
