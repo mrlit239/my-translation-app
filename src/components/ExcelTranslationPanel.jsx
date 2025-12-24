@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { Upload, FileSpreadsheet, Languages, Download, Loader2, Image, AlertCircle, CheckCircle, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { Upload, FileSpreadsheet, Languages, Download, Loader2, Image, AlertCircle, CheckCircle, X, ChevronDown, ChevronUp, Layers } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { BACKEND_URL } from '../constants/apiConfig';
 
@@ -14,14 +14,17 @@ export default function ExcelTranslationPanel({
     const [workbook, setWorkbook] = useState(null);
     const [sheets, setSheets] = useState([]);
     const [selectedSheet, setSelectedSheet] = useState('');
+    const [allSheetsData, setAllSheetsData] = useState({}); // Store all sheets data
     const [previewData, setPreviewData] = useState([]);
     const [images, setImages] = useState([]);
     const [isTranslating, setIsTranslating] = useState(false);
     const [progress, setProgress] = useState({ current: 0, total: 0, phase: '' });
+    const [translatedWorkbook, setTranslatedWorkbook] = useState(null); // Store translated workbook
     const [translatedData, setTranslatedData] = useState([]);
     const [imageTranslations, setImageTranslations] = useState([]);
     const [error, setError] = useState('');
     const [showImageResults, setShowImageResults] = useState(true);
+    const [translateAllSheets, setTranslateAllSheets] = useState(true); // Option to translate all sheets
 
     const fileInputRef = useRef(null);
     const dropZoneRef = useRef(null);
@@ -50,56 +53,78 @@ export default function ExcelTranslationPanel({
 
         try {
             const arrayBuffer = await uploadedFile.arrayBuffer();
-            const wb = XLSX.read(arrayBuffer, { type: 'array', cellStyles: true });
+            // Read with all options to preserve as much data as possible
+            const wb = XLSX.read(arrayBuffer, {
+                type: 'array',
+                cellStyles: true,
+                cellDates: true,
+                cellNF: true,
+                sheetStubs: true // Include empty cells
+            });
 
             setWorkbook(wb);
             setSheets(wb.SheetNames);
             setSelectedSheet(wb.SheetNames[0]);
 
-            // Parse first sheet for preview
-            parseSheet(wb, wb.SheetNames[0]);
+            // Parse all sheets
+            const allData = {};
+            wb.SheetNames.forEach(sheetName => {
+                allData[sheetName] = parseSheetData(wb, sheetName);
+            });
+            setAllSheetsData(allData);
 
-            // Extract images if any
-            extractImages(wb, wb.SheetNames[0]);
+            // Set preview for first sheet
+            setPreviewData(allData[wb.SheetNames[0]] || []);
+
+            // Extract images
+            extractImages(wb);
 
         } catch (err) {
             setError(`Error reading Excel file: ${err.message}`);
         }
     };
 
-    // Parse sheet data
-    const parseSheet = (wb, sheetName) => {
+    // Parse sheet data - improved to handle all cell types
+    const parseSheetData = (wb, sheetName) => {
         const sheet = wb.Sheets[sheetName];
-        const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-        setPreviewData(data);
-        setTranslatedData([]);
+        if (!sheet) return [];
+
+        // Get the range of the sheet
+        const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1');
+        const data = [];
+
+        for (let row = range.s.r; row <= range.e.r; row++) {
+            const rowData = [];
+            for (let col = range.s.c; col <= range.e.c; col++) {
+                const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+                const cell = sheet[cellAddress];
+
+                if (cell) {
+                    // Get the formatted value or raw value
+                    let value = '';
+                    if (cell.w !== undefined) {
+                        // Formatted text representation
+                        value = cell.w;
+                    } else if (cell.v !== undefined) {
+                        // Raw value
+                        value = String(cell.v);
+                    }
+                    rowData.push(value);
+                } else {
+                    rowData.push('');
+                }
+            }
+            data.push(rowData);
+        }
+
+        return data;
     };
 
     // Extract embedded images from Excel
-    const extractImages = (wb, sheetName) => {
+    const extractImages = (wb) => {
         const extractedImages = [];
 
-        // Check for images in the workbook
-        // xlsx library stores images in wb.Sheets[sheetName]['!images'] or wb.Sheets[sheetName]['!drawings']
-        const sheet = wb.Sheets[sheetName];
-
-        // Method 1: Check for embedded images via !images property
-        if (sheet['!images']) {
-            sheet['!images'].forEach((img, index) => {
-                if (img.data) {
-                    extractedImages.push({
-                        id: `img-${index}`,
-                        name: img.name || `Image ${index + 1}`,
-                        data: img.data,
-                        mimeType: img.type || 'image/png',
-                        cell: img.cell || 'Unknown',
-                        translated: null
-                    });
-                }
-            });
-        }
-
-        // Method 2: Check in workbook's media folder (for newer xlsx format)
+        // Check workbook for media
         if (wb.Workbook && wb.Workbook.Media) {
             wb.Workbook.Media.forEach((media, index) => {
                 if (media.data && media.type?.startsWith('image/')) {
@@ -114,6 +139,25 @@ export default function ExcelTranslationPanel({
                 }
             });
         }
+
+        // Also check each sheet for images
+        wb.SheetNames.forEach(sheetName => {
+            const sheet = wb.Sheets[sheetName];
+            if (sheet['!images']) {
+                sheet['!images'].forEach((img, index) => {
+                    if (img.data) {
+                        extractedImages.push({
+                            id: `${sheetName}-img-${index}`,
+                            name: img.name || `${sheetName} - Image ${index + 1}`,
+                            data: typeof img.data === 'string' ? img.data : arrayBufferToBase64(img.data),
+                            mimeType: img.type || 'image/png',
+                            cell: img.cell || sheetName,
+                            translated: null
+                        });
+                    }
+                });
+            }
+        });
 
         setImages(extractedImages);
     };
@@ -131,121 +175,224 @@ export default function ExcelTranslationPanel({
     // Handle sheet selection change
     const handleSheetChange = (sheetName) => {
         setSelectedSheet(sheetName);
-        if (workbook) {
-            parseSheet(workbook, sheetName);
-            extractImages(workbook, sheetName);
+        if (allSheetsData[sheetName]) {
+            setPreviewData(allSheetsData[sheetName]);
+            setTranslatedData([]);
         }
     };
 
-    // Count translatable cells
-    const countTranslatableCells = () => {
+    // Count translatable cells across all sheets or selected sheet
+    const countTranslatableCells = (sheetsToCount = null) => {
         let count = 0;
-        previewData.forEach(row => {
-            row.forEach(cell => {
-                if (cell && typeof cell === 'string' && cell.trim().length > 0) {
-                    count++;
-                }
-            });
+        const dataToCount = sheetsToCount || (translateAllSheets ? allSheetsData : { [selectedSheet]: previewData });
+
+        Object.values(dataToCount).forEach(sheetData => {
+            if (Array.isArray(sheetData)) {
+                sheetData.forEach(row => {
+                    if (Array.isArray(row)) {
+                        row.forEach(cell => {
+                            if (cell && String(cell).trim().length > 0 && hasTranslatableText(cell)) {
+                                count++;
+                            }
+                        });
+                    }
+                });
+            }
         });
         return count;
     };
 
+    // Check if cell contains translatable text (Japanese/Chinese characters)
+    const hasTranslatableText = (text) => {
+        const str = String(text);
+        // Check for Japanese (Hiragana, Katakana, Kanji) or Chinese characters
+        return /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\u3400-\u4DBF]/.test(str);
+    };
+
     // Translate all content
     const translateAll = async () => {
-        if (!workbook || previewData.length === 0) return;
+        if (!workbook) return;
 
         setIsTranslating(true);
         setError('');
 
-        const totalCells = countTranslatableCells();
+        const sheetsToTranslate = translateAllSheets ? sheets : [selectedSheet];
+
+        // Count total translatable cells
+        let totalCells = 0;
+        sheetsToTranslate.forEach(sheetName => {
+            const data = allSheetsData[sheetName] || [];
+            data.forEach(row => {
+                if (Array.isArray(row)) {
+                    row.forEach(cell => {
+                        if (cell && String(cell).trim().length > 0 && hasTranslatableText(cell)) {
+                            totalCells++;
+                        }
+                    });
+                }
+            });
+        });
+
         const totalImages = images.length;
         const totalItems = totalCells + totalImages;
 
+        if (totalItems === 0) {
+            setError('No translatable content found (Japanese/Chinese text)');
+            setIsTranslating(false);
+            return;
+        }
+
         try {
-            // Phase 1: Translate text cells
-            setProgress({ current: 0, total: totalItems, phase: 'Translating text cells...' });
+            setProgress({ current: 0, total: totalItems, phase: 'Preparing translation...' });
 
-            const translated = [];
             let processedCells = 0;
+            const translatedSheetsData = {};
 
-            // Collect all non-empty cells for batch translation
-            const cellsToTranslate = [];
-            previewData.forEach((row, rowIndex) => {
-                row.forEach((cell, colIndex) => {
-                    if (cell && typeof cell === 'string' && cell.trim().length > 0) {
-                        cellsToTranslate.push({ rowIndex, colIndex, text: cell });
+            // Translate each sheet
+            for (const sheetName of sheetsToTranslate) {
+                const sheetData = allSheetsData[sheetName] || [];
+                if (sheetData.length === 0) continue;
+
+                setProgress({
+                    current: processedCells,
+                    total: totalItems,
+                    phase: `Translating sheet: ${sheetName}...`
+                });
+
+                // Collect all translatable cells
+                const cellsToTranslate = [];
+                sheetData.forEach((row, rowIndex) => {
+                    if (Array.isArray(row)) {
+                        row.forEach((cell, colIndex) => {
+                            if (cell && String(cell).trim().length > 0 && hasTranslatableText(cell)) {
+                                cellsToTranslate.push({ rowIndex, colIndex, text: String(cell) });
+                            }
+                        });
                     }
                 });
-            });
 
-            // Batch translate cells (group by ~50 cells or 5000 chars)
-            const batches = [];
-            let currentBatch = [];
-            let currentBatchChars = 0;
+                // Create translated copy
+                const translatedRows = sheetData.map(row =>
+                    Array.isArray(row) ? [...row] : row
+                );
 
-            cellsToTranslate.forEach(cell => {
-                if (currentBatch.length >= 30 || currentBatchChars + cell.text.length > 4000) {
-                    if (currentBatch.length > 0) batches.push(currentBatch);
-                    currentBatch = [cell];
-                    currentBatchChars = cell.text.length;
-                } else {
-                    currentBatch.push(cell);
-                    currentBatchChars += cell.text.length;
-                }
-            });
-            if (currentBatch.length > 0) batches.push(currentBatch);
-
-            // Create empty translated data structure
-            const translatedRows = previewData.map(row => [...row]);
-
-            // Process batches
-            for (const batch of batches) {
-                // Format batch for translation
-                const batchText = batch.map((cell, i) => `[${i}] ${cell.text}`).join('\n---\n');
-
-                const response = await fetch(`${BACKEND_URL}/api/translate/gemini`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model: model || 'gemini-2.5-flash',
-                        prompt: `${customPrompt}\n\nIMPORTANT: You are translating cells from an Excel spreadsheet. Each cell is marked with [number]. Translate each cell and keep the [number] markers in your output so I can match them. Keep translations concise and maintain the original meaning.`,
-                        text: batchText
-                    })
-                });
-
-                if (!response.ok) {
-                    const err = await response.json().catch(() => ({}));
-                    throw new Error(err.error || 'Translation failed');
+                if (cellsToTranslate.length === 0) {
+                    translatedSheetsData[sheetName] = translatedRows;
+                    continue;
                 }
 
-                const result = await response.json();
-                const translatedText = result.translation || '';
+                // Batch translate cells (group by ~20 cells or 3000 chars for better accuracy)
+                const batches = [];
+                let currentBatch = [];
+                let currentBatchChars = 0;
 
-                // Parse translated results
-                const translatedParts = translatedText.split(/\[(\d+)\]/);
-                const translations = {};
-
-                for (let i = 1; i < translatedParts.length; i += 2) {
-                    const index = parseInt(translatedParts[i]);
-                    const text = translatedParts[i + 1]?.trim().replace(/^[\s\-:]+/, '').replace(/---$/, '').trim() || '';
-                    if (text) translations[index] = text;
-                }
-
-                // Apply translations to cells
-                batch.forEach((cell, i) => {
-                    if (translations[i]) {
-                        translatedRows[cell.rowIndex][cell.colIndex] = translations[i];
+                cellsToTranslate.forEach(cell => {
+                    if (currentBatch.length >= 20 || currentBatchChars + cell.text.length > 3000) {
+                        if (currentBatch.length > 0) batches.push(currentBatch);
+                        currentBatch = [cell];
+                        currentBatchChars = cell.text.length;
+                    } else {
+                        currentBatch.push(cell);
+                        currentBatchChars += cell.text.length;
                     }
-                    processedCells++;
-                    setProgress({
-                        current: processedCells,
-                        total: totalItems,
-                        phase: `Translating text cells... (${processedCells}/${totalCells})`
-                    });
                 });
+                if (currentBatch.length > 0) batches.push(currentBatch);
+
+                // Process batches for this sheet
+                for (const batch of batches) {
+                    // Format batch for translation - use clear markers
+                    const batchText = batch.map((cell, i) => `【${i}】${cell.text}`).join('\n');
+
+                    try {
+                        const response = await fetch(`${BACKEND_URL}/api/translate/gemini`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                model: model || 'gemini-2.5-flash',
+                                prompt: `${customPrompt}
+
+IMPORTANT INSTRUCTIONS FOR EXCEL CELL TRANSLATION:
+1. You are translating cells from an Excel spreadsheet
+2. Each cell is marked with 【number】 (e.g., 【0】, 【1】, 【2】)
+3. Translate each cell and KEEP the 【number】 markers in your output
+4. Keep translations concise - these are spreadsheet cells
+5. Preserve any numbers, dates, or technical terms
+6. Output format must be: 【0】translated text【1】translated text...
+
+Example:
+Input: 【0】給与計算【1】自動化ツール
+Output: 【0】Payroll Calculation【1】Automation Tool`,
+                                text: batchText
+                            })
+                        });
+
+                        if (!response.ok) {
+                            const err = await response.json().catch(() => ({}));
+                            throw new Error(err.error || 'Translation failed');
+                        }
+
+                        const result = await response.json();
+                        const translatedText = result.translation || '';
+
+                        // Parse translated results using the markers
+                        const regex = /【(\d+)】([^【]*)/g;
+                        let match;
+                        const translations = {};
+
+                        while ((match = regex.exec(translatedText)) !== null) {
+                            const index = parseInt(match[1]);
+                            const text = match[2].trim();
+                            if (text) translations[index] = text;
+                        }
+
+                        // Apply translations to cells
+                        batch.forEach((cell, i) => {
+                            if (translations[i]) {
+                                translatedRows[cell.rowIndex][cell.colIndex] = translations[i];
+                            }
+                            processedCells++;
+                            setProgress({
+                                current: processedCells,
+                                total: totalItems,
+                                phase: `Translating ${sheetName}... (${processedCells}/${totalCells} cells)`
+                            });
+                        });
+                    } catch (batchErr) {
+                        console.error('Batch translation error:', batchErr);
+                        // Continue with next batch even if one fails
+                        processedCells += batch.length;
+                    }
+                }
+
+                translatedSheetsData[sheetName] = translatedRows;
             }
 
-            setTranslatedData(translatedRows);
+            // Update preview with translated data for selected sheet
+            if (translatedSheetsData[selectedSheet]) {
+                setTranslatedData(translatedSheetsData[selectedSheet]);
+            }
+
+            // Create translated workbook
+            const newWb = XLSX.utils.book_new();
+            sheetsToTranslate.forEach(sheetName => {
+                const data = translatedSheetsData[sheetName] || allSheetsData[sheetName] || [];
+                const newWs = XLSX.utils.aoa_to_sheet(data);
+
+                // Try to copy column widths from original
+                const originalSheet = workbook.Sheets[sheetName];
+                if (originalSheet['!cols']) {
+                    newWs['!cols'] = originalSheet['!cols'];
+                }
+                if (originalSheet['!rows']) {
+                    newWs['!rows'] = originalSheet['!rows'];
+                }
+                if (originalSheet['!merges']) {
+                    newWs['!merges'] = originalSheet['!merges'];
+                }
+
+                XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
+            });
+            setTranslatedWorkbook(newWb);
 
             // Phase 2: Translate images
             if (images.length > 0) {
@@ -303,19 +450,14 @@ export default function ExcelTranslationPanel({
 
     // Download translated Excel
     const downloadTranslatedExcel = () => {
-        if (translatedData.length === 0) return;
-
-        // Create new workbook with translated data
-        const newWb = XLSX.utils.book_new();
-        const newWs = XLSX.utils.aoa_to_sheet(translatedData);
-        XLSX.utils.book_append_sheet(newWb, newWs, selectedSheet);
+        if (!translatedWorkbook) return;
 
         // Generate filename
         const originalName = file?.name?.replace(/\.(xlsx|xls)$/i, '') || 'document';
         const filename = `${originalName}_translated.xlsx`;
 
         // Download
-        XLSX.writeFile(newWb, filename);
+        XLSX.writeFile(translatedWorkbook, filename);
     };
 
     // Clear all
@@ -324,14 +466,18 @@ export default function ExcelTranslationPanel({
         setWorkbook(null);
         setSheets([]);
         setSelectedSheet('');
+        setAllSheetsData({});
         setPreviewData([]);
         setImages([]);
+        setTranslatedWorkbook(null);
         setTranslatedData([]);
         setImageTranslations([]);
         setError('');
         setProgress({ current: 0, total: 0, phase: '' });
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
+
+    const totalCellsCount = countTranslatableCells();
 
     return (
         <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50 dark:bg-slate-900">
@@ -395,7 +541,7 @@ export default function ExcelTranslationPanel({
                             or click to browse (.xlsx, .xls)
                         </p>
                         <p className="text-xs text-slate-400 dark:text-slate-500">
-                            Supports text cells and embedded images
+                            Supports all sheets, text cells, and embedded images
                         </p>
                     </div>
                 )}
@@ -413,12 +559,25 @@ export default function ExcelTranslationPanel({
                                     <div>
                                         <p className="font-medium text-slate-900 dark:text-white">{file.name}</p>
                                         <p className="text-sm text-slate-500 dark:text-slate-400">
-                                            {countTranslatableCells()} text cells • {images.length} images
+                                            {sheets.length} sheet(s) • {totalCellsCount} translatable cells • {images.length} images
                                         </p>
                                     </div>
                                 </div>
 
-                                <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-3 flex-wrap">
+                                    {/* Translate All Sheets Toggle */}
+                                    <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={translateAllSheets}
+                                            onChange={(e) => setTranslateAllSheets(e.target.checked)}
+                                            className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                        />
+                                        <Layers className="w-4 h-4" />
+                                        All sheets
+                                    </label>
+
+                                    {/* Sheet selector for preview */}
                                     {sheets.length > 1 && (
                                         <select
                                             value={selectedSheet}
@@ -433,7 +592,7 @@ export default function ExcelTranslationPanel({
 
                                     <button
                                         onClick={translateAll}
-                                        disabled={isTranslating}
+                                        disabled={isTranslating || totalCellsCount === 0}
                                         className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
                                     >
                                         {isTranslating ? (
@@ -444,12 +603,12 @@ export default function ExcelTranslationPanel({
                                         ) : (
                                             <>
                                                 <Languages className="w-4 h-4" />
-                                                Translate All
+                                                Translate {translateAllSheets ? 'All' : 'Sheet'}
                                             </>
                                         )}
                                     </button>
 
-                                    {translatedData.length > 0 && (
+                                    {translatedWorkbook && (
                                         <button
                                             onClick={downloadTranslatedExcel}
                                             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
@@ -466,46 +625,72 @@ export default function ExcelTranslationPanel({
                                 <div className="mt-4">
                                     <div className="flex justify-between text-sm text-slate-600 dark:text-slate-400 mb-1">
                                         <span>{progress.phase}</span>
-                                        <span>{Math.round((progress.current / progress.total) * 100)}%</span>
+                                        <span>{progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0}%</span>
                                     </div>
                                     <div className="h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
                                         <div
                                             className="h-full bg-indigo-600 transition-all duration-300"
-                                            style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                                            style={{ width: `${progress.total > 0 ? (progress.current / progress.total) * 100 : 0}%` }}
                                         />
                                     </div>
                                 </div>
                             )}
                         </div>
 
+                        {/* Sheet Tabs */}
+                        {sheets.length > 1 && (
+                            <div className="flex gap-1 overflow-x-auto pb-2">
+                                {sheets.map(sheet => (
+                                    <button
+                                        key={sheet}
+                                        onClick={() => handleSheetChange(sheet)}
+                                        className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap transition-colors ${selectedSheet === sheet
+                                                ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
+                                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                            }`}
+                                    >
+                                        {sheet}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+
                         {/* Data Preview / Translated Data */}
                         <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-                            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700">
+                            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
                                 <h3 className="font-medium text-slate-900 dark:text-white">
-                                    {translatedData.length > 0 ? 'Translated Content' : 'Original Content'}
+                                    {translatedData.length > 0 ? 'Translated Content' : 'Original Content'} - {selectedSheet}
                                 </h3>
+                                <span className="text-xs text-slate-500">
+                                    {(translatedData.length > 0 ? translatedData : previewData).length} rows
+                                </span>
                             </div>
                             <div className="overflow-auto max-h-96">
                                 <table className="w-full text-sm">
                                     <tbody>
-                                        {(translatedData.length > 0 ? translatedData : previewData).slice(0, 50).map((row, rowIndex) => (
-                                            <tr key={rowIndex} className="border-b border-slate-100 dark:border-slate-700 last:border-0">
-                                                {row.map((cell, colIndex) => (
+                                        {(translatedData.length > 0 ? translatedData : previewData).slice(0, 100).map((row, rowIndex) => (
+                                            <tr key={rowIndex} className="border-b border-slate-100 dark:border-slate-700 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-700/30">
+                                                <td className="px-2 py-1 text-xs text-slate-400 border-r border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 w-8">
+                                                    {rowIndex + 1}
+                                                </td>
+                                                {Array.isArray(row) && row.map((cell, colIndex) => (
                                                     <td
                                                         key={colIndex}
-                                                        className="px-3 py-2 text-slate-700 dark:text-slate-300 border-r border-slate-100 dark:border-slate-700 last:border-0 whitespace-nowrap max-w-xs truncate"
+                                                        className="px-3 py-2 text-slate-700 dark:text-slate-300 border-r border-slate-100 dark:border-slate-700 last:border-0 max-w-xs"
                                                         title={String(cell)}
                                                     >
-                                                        {String(cell)}
+                                                        <div className="truncate max-w-[200px]">
+                                                            {String(cell || '')}
+                                                        </div>
                                                     </td>
                                                 ))}
                                             </tr>
                                         ))}
                                     </tbody>
                                 </table>
-                                {previewData.length > 50 && (
+                                {previewData.length > 100 && (
                                     <div className="px-4 py-2 text-sm text-slate-500 dark:text-slate-400 text-center bg-slate-50 dark:bg-slate-800/50">
-                                        Showing first 50 rows of {previewData.length}
+                                        Showing first 100 rows of {previewData.length}
                                     </div>
                                 )}
                             </div>
