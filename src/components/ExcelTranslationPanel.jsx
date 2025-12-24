@@ -1,30 +1,33 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { Upload, FileSpreadsheet, Languages, Download, Loader2, Image, AlertCircle, CheckCircle, X, ChevronDown, ChevronUp, Layers } from 'lucide-react';
+import { Upload, FileSpreadsheet, Languages, Download, Loader2, AlertCircle, CheckCircle, X, ChevronDown, ChevronUp, Layers, Settings } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { BACKEND_URL } from '../constants/apiConfig';
 
 export default function ExcelTranslationPanel({
-    customPrompt,
+    customPrompt: globalCustomPrompt,
     model,
     apiKey,
     onBack
 }) {
     // State
     const [file, setFile] = useState(null);
+    const [originalArrayBuffer, setOriginalArrayBuffer] = useState(null); // Store original file
     const [workbook, setWorkbook] = useState(null);
     const [sheets, setSheets] = useState([]);
     const [selectedSheet, setSelectedSheet] = useState('');
-    const [allSheetsData, setAllSheetsData] = useState({}); // Store all sheets data
     const [previewData, setPreviewData] = useState([]);
-    const [images, setImages] = useState([]);
     const [isTranslating, setIsTranslating] = useState(false);
     const [progress, setProgress] = useState({ current: 0, total: 0, phase: '' });
-    const [translatedWorkbook, setTranslatedWorkbook] = useState(null); // Store translated workbook
+    const [translatedWorkbook, setTranslatedWorkbook] = useState(null);
     const [translatedData, setTranslatedData] = useState([]);
-    const [imageTranslations, setImageTranslations] = useState([]);
     const [error, setError] = useState('');
-    const [showImageResults, setShowImageResults] = useState(true);
-    const [translateAllSheets, setTranslateAllSheets] = useState(true); // Option to translate all sheets
+    const [translateAllSheets, setTranslateAllSheets] = useState(true);
+    const [showSettings, setShowSettings] = useState(false);
+
+    // Custom prompt for Excel (separate from text translation)
+    const [excelPrompt, setExcelPrompt] = useState(
+        'Translate the following Japanese text to Vietnamese. Maintain professional tone. Preserve technical terms, proper nouns, file names, and formatting.'
+    );
 
     const fileInputRef = useRef(null);
     const dropZoneRef = useRef(null);
@@ -50,69 +53,51 @@ export default function ExcelTranslationPanel({
     const processFile = async (uploadedFile) => {
         setError('');
         setFile(uploadedFile);
+        setTranslatedWorkbook(null);
+        setTranslatedData([]);
 
         try {
             const arrayBuffer = await uploadedFile.arrayBuffer();
-            // Read with all options to preserve as much data as possible
+            setOriginalArrayBuffer(arrayBuffer.slice(0)); // Store a copy
+
+            // Read workbook with full options to preserve everything
             const wb = XLSX.read(arrayBuffer, {
                 type: 'array',
                 cellStyles: true,
                 cellDates: true,
                 cellNF: true,
-                sheetStubs: true // Include empty cells
+                cellFormula: true,
+                sheetStubs: true,
+                bookVBA: true,
+                bookImages: true
             });
 
             setWorkbook(wb);
             setSheets(wb.SheetNames);
             setSelectedSheet(wb.SheetNames[0]);
 
-            // Parse all sheets
-            const allData = {};
-            wb.SheetNames.forEach(sheetName => {
-                allData[sheetName] = parseSheetData(wb, sheetName);
-            });
-            setAllSheetsData(allData);
-
-            // Set preview for first sheet
-            setPreviewData(allData[wb.SheetNames[0]] || []);
-
-            // Extract images
-            extractImages(wb);
+            // Parse first sheet for preview
+            setPreviewData(parseSheetForPreview(wb, wb.SheetNames[0]));
 
         } catch (err) {
             setError(`Error reading Excel file: ${err.message}`);
         }
     };
 
-    // Parse sheet data - improved to handle all cell types
-    const parseSheetData = (wb, sheetName) => {
+    // Parse sheet data for preview only
+    const parseSheetForPreview = (wb, sheetName) => {
         const sheet = wb.Sheets[sheetName];
-        if (!sheet) return [];
+        if (!sheet || !sheet['!ref']) return [];
 
-        // Get the range of the sheet
-        const range = XLSX.utils.decode_range(sheet['!ref'] || 'A1');
+        const range = XLSX.utils.decode_range(sheet['!ref']);
         const data = [];
 
-        for (let row = range.s.r; row <= range.e.r; row++) {
+        for (let row = range.s.r; row <= Math.min(range.e.r, 100); row++) {
             const rowData = [];
             for (let col = range.s.c; col <= range.e.c; col++) {
                 const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
                 const cell = sheet[cellAddress];
-
-                if (cell) {
-                    // Get the formatted value or raw value
-                    let value = '';
-                    if (cell.w !== undefined) {
-                        // Formatted text representation
-                        value = cell.w;
-                    } else if (cell.v !== undefined) {
-                        // Raw value
-                        value = String(cell.v);
-                    }
-                    rowData.push(value);
-                } else {
-                    rowData.push('');
-                }
+                rowData.push(cell ? (cell.w || cell.v || '') : '');
             }
             data.push(rowData);
         }
@@ -120,98 +105,66 @@ export default function ExcelTranslationPanel({
         return data;
     };
 
-    // Extract embedded images from Excel
-    const extractImages = (wb) => {
-        const extractedImages = [];
-
-        // Check workbook for media
-        if (wb.Workbook && wb.Workbook.Media) {
-            wb.Workbook.Media.forEach((media, index) => {
-                if (media.data && media.type?.startsWith('image/')) {
-                    extractedImages.push({
-                        id: `media-${index}`,
-                        name: media.name || `Image ${index + 1}`,
-                        data: typeof media.data === 'string' ? media.data : arrayBufferToBase64(media.data),
-                        mimeType: media.type,
-                        cell: 'Embedded',
-                        translated: null
-                    });
-                }
-            });
-        }
-
-        // Also check each sheet for images
-        wb.SheetNames.forEach(sheetName => {
-            const sheet = wb.Sheets[sheetName];
-            if (sheet['!images']) {
-                sheet['!images'].forEach((img, index) => {
-                    if (img.data) {
-                        extractedImages.push({
-                            id: `${sheetName}-img-${index}`,
-                            name: img.name || `${sheetName} - Image ${index + 1}`,
-                            data: typeof img.data === 'string' ? img.data : arrayBufferToBase64(img.data),
-                            mimeType: img.type || 'image/png',
-                            cell: img.cell || sheetName,
-                            translated: null
-                        });
-                    }
-                });
-            }
-        });
-
-        setImages(extractedImages);
-    };
-
-    // Helper to convert ArrayBuffer to Base64
-    const arrayBufferToBase64 = (buffer) => {
-        let binary = '';
-        const bytes = new Uint8Array(buffer);
-        for (let i = 0; i < bytes.byteLength; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-    };
-
     // Handle sheet selection change
     const handleSheetChange = (sheetName) => {
         setSelectedSheet(sheetName);
-        if (allSheetsData[sheetName]) {
-            setPreviewData(allSheetsData[sheetName]);
+        if (workbook) {
+            setPreviewData(parseSheetForPreview(workbook, sheetName));
             setTranslatedData([]);
         }
     };
 
-    // Count translatable cells across all sheets or selected sheet
-    const countTranslatableCells = (sheetsToCount = null) => {
-        let count = 0;
-        const dataToCount = sheetsToCount || (translateAllSheets ? allSheetsData : { [selectedSheet]: previewData });
-
-        Object.values(dataToCount).forEach(sheetData => {
-            if (Array.isArray(sheetData)) {
-                sheetData.forEach(row => {
-                    if (Array.isArray(row)) {
-                        row.forEach(cell => {
-                            if (cell && String(cell).trim().length > 0 && hasTranslatableText(cell)) {
-                                count++;
-                            }
-                        });
-                    }
-                });
-            }
-        });
-        return count;
-    };
-
     // Check if cell contains translatable text (Japanese/Chinese characters)
     const hasTranslatableText = (text) => {
-        const str = String(text);
-        // Check for Japanese (Hiragana, Katakana, Kanji) or Chinese characters
+        const str = String(text || '');
         return /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF\u3400-\u4DBF]/.test(str);
     };
 
-    // Translate all content
+    // Get all translatable cells from a sheet
+    const getTranslatableCells = (sheet) => {
+        if (!sheet || !sheet['!ref']) return [];
+
+        const range = XLSX.utils.decode_range(sheet['!ref']);
+        const cells = [];
+
+        for (let row = range.s.r; row <= range.e.r; row++) {
+            for (let col = range.s.c; col <= range.e.c; col++) {
+                const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+                const cell = sheet[cellAddress];
+
+                if (cell && cell.t === 's' && cell.v && hasTranslatableText(cell.v)) {
+                    cells.push({
+                        address: cellAddress,
+                        row,
+                        col,
+                        value: String(cell.v),
+                        cell
+                    });
+                }
+            }
+        }
+
+        return cells;
+    };
+
+    // Count total translatable cells
+    const countTranslatableCells = () => {
+        if (!workbook) return 0;
+
+        let count = 0;
+        const sheetsToCount = translateAllSheets ? sheets : [selectedSheet];
+
+        sheetsToCount.forEach(sheetName => {
+            const sheet = workbook.Sheets[sheetName];
+            count += getTranslatableCells(sheet).length;
+        });
+
+        return count;
+    };
+
+    // Translate all content - MODIFYING CELLS IN-PLACE
     const translateAll = async () => {
-        if (!workbook) return;
+        if (!workbook || !originalArrayBuffer) return;
 
         setIsTranslating(true);
         setError('');
@@ -221,87 +174,66 @@ export default function ExcelTranslationPanel({
         // Count total translatable cells
         let totalCells = 0;
         sheetsToTranslate.forEach(sheetName => {
-            const data = allSheetsData[sheetName] || [];
-            data.forEach(row => {
-                if (Array.isArray(row)) {
-                    row.forEach(cell => {
-                        if (cell && String(cell).trim().length > 0 && hasTranslatableText(cell)) {
-                            totalCells++;
-                        }
-                    });
-                }
-            });
+            const sheet = workbook.Sheets[sheetName];
+            totalCells += getTranslatableCells(sheet).length;
         });
 
-        const totalImages = images.length;
-        const totalItems = totalCells + totalImages;
-
-        if (totalItems === 0) {
+        if (totalCells === 0) {
             setError('No translatable content found (Japanese/Chinese text)');
             setIsTranslating(false);
             return;
         }
 
         try {
-            setProgress({ current: 0, total: totalItems, phase: 'Preparing translation...' });
+            setProgress({ current: 0, total: totalCells, phase: 'Preparing translation...' });
+
+            // Create a fresh copy of the workbook from original buffer
+            const translatedWb = XLSX.read(originalArrayBuffer.slice(0), {
+                type: 'array',
+                cellStyles: true,
+                cellDates: true,
+                cellNF: true,
+                cellFormula: true,
+                sheetStubs: true,
+                bookVBA: true,
+                bookImages: true
+            });
 
             let processedCells = 0;
-            const translatedSheetsData = {};
 
             // Translate each sheet
             for (const sheetName of sheetsToTranslate) {
-                const sheetData = allSheetsData[sheetName] || [];
-                if (sheetData.length === 0) continue;
+                const sheet = translatedWb.Sheets[sheetName];
+                const cellsToTranslate = getTranslatableCells(sheet);
+
+                if (cellsToTranslate.length === 0) continue;
 
                 setProgress({
                     current: processedCells,
-                    total: totalItems,
-                    phase: `Translating sheet: ${sheetName}...`
+                    total: totalCells,
+                    phase: `Translating: ${sheetName}...`
                 });
 
-                // Collect all translatable cells
-                const cellsToTranslate = [];
-                sheetData.forEach((row, rowIndex) => {
-                    if (Array.isArray(row)) {
-                        row.forEach((cell, colIndex) => {
-                            if (cell && String(cell).trim().length > 0 && hasTranslatableText(cell)) {
-                                cellsToTranslate.push({ rowIndex, colIndex, text: String(cell) });
-                            }
-                        });
-                    }
-                });
-
-                // Create translated copy
-                const translatedRows = sheetData.map(row =>
-                    Array.isArray(row) ? [...row] : row
-                );
-
-                if (cellsToTranslate.length === 0) {
-                    translatedSheetsData[sheetName] = translatedRows;
-                    continue;
-                }
-
-                // Batch translate cells (group by ~20 cells or 3000 chars for better accuracy)
+                // Batch translate cells (group by ~15 cells or 2500 chars)
                 const batches = [];
                 let currentBatch = [];
                 let currentBatchChars = 0;
 
-                cellsToTranslate.forEach(cell => {
-                    if (currentBatch.length >= 20 || currentBatchChars + cell.text.length > 3000) {
+                cellsToTranslate.forEach(cellInfo => {
+                    if (currentBatch.length >= 15 || currentBatchChars + cellInfo.value.length > 2500) {
                         if (currentBatch.length > 0) batches.push(currentBatch);
-                        currentBatch = [cell];
-                        currentBatchChars = cell.text.length;
+                        currentBatch = [cellInfo];
+                        currentBatchChars = cellInfo.value.length;
                     } else {
-                        currentBatch.push(cell);
-                        currentBatchChars += cell.text.length;
+                        currentBatch.push(cellInfo);
+                        currentBatchChars += cellInfo.value.length;
                     }
                 });
                 if (currentBatch.length > 0) batches.push(currentBatch);
 
-                // Process batches for this sheet
+                // Process batches
                 for (const batch of batches) {
-                    // Format batch for translation - use clear markers
-                    const batchText = batch.map((cell, i) => `【${i}】${cell.text}`).join('\n');
+                    const batchText = batch.map((cellInfo, i) => `【${i}】${cellInfo.value}`).join('\n');
 
                     try {
                         const response = await fetch(`${BACKEND_URL}/api/translate/gemini`, {
@@ -309,37 +241,29 @@ export default function ExcelTranslationPanel({
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                                 model: model || 'gemini-3-flash',
-                                prompt: `You are a professional document translator. Translate the following Japanese/Chinese text to Vietnamese.
+                                prompt: `${excelPrompt}
 
-TRANSLATION GUIDELINES:
-- This is a business/technical document (spreadsheet)
-- Maintain professional and formal tone
-- Preserve technical terms and proper nouns when appropriate
-- Keep translations concise and accurate
-- Preserve any numbers, dates, file names, or code references exactly as they appear
-
-EXCEL CELL FORMATTING INSTRUCTIONS:
-1. Each cell is marked with 【number】 (e.g., 【0】, 【1】, 【2】)
-2. Translate each cell and KEEP the 【number】 markers in your output
-3. Keep translations concise - these are spreadsheet cells
-4. Output format must be: 【0】translated text【1】translated text...
+EXCEL CELL FORMAT:
+- Each cell is marked with 【number】
+- Translate each cell and KEEP the 【number】 markers
+- Keep translations concise (spreadsheet cells)
+- Output: 【0】translation【1】translation...
 
 Example:
-Input: 【0】給与計算【1】自動化ツール【2】処理フロー
-Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình xử lý`,
+Input: 【0】給与計算【1】自動化ツール
+Output: 【0】Tính lương【1】Công cụ tự động hóa`,
                                 text: batchText
                             })
                         });
 
                         if (!response.ok) {
-                            const err = await response.json().catch(() => ({}));
-                            throw new Error(err.error || 'Translation failed');
+                            throw new Error('Translation request failed');
                         }
 
                         const result = await response.json();
                         const translatedText = result.translation || '';
 
-                        // Parse translated results using the markers
+                        // Parse translations
                         const regex = /【(\d+)】([^【]*)/g;
                         let match;
                         const translations = {};
@@ -350,101 +274,38 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                             if (text) translations[index] = text;
                         }
 
-                        // Apply translations to cells
-                        batch.forEach((cell, i) => {
+                        // Apply translations IN-PLACE to the sheet cells
+                        batch.forEach((cellInfo, i) => {
                             if (translations[i]) {
-                                translatedRows[cell.rowIndex][cell.colIndex] = translations[i];
+                                const cell = sheet[cellInfo.address];
+                                if (cell) {
+                                    cell.v = translations[i]; // Update value
+                                    cell.w = translations[i]; // Update formatted value
+                                    if (cell.h) cell.h = translations[i]; // Update HTML if present
+                                }
                             }
                             processedCells++;
-                            setProgress({
-                                current: processedCells,
-                                total: totalItems,
-                                phase: `Translating ${sheetName}... (${processedCells}/${totalCells} cells)`
-                            });
                         });
+
+                        setProgress({
+                            current: processedCells,
+                            total: totalCells,
+                            phase: `Translating: ${sheetName} (${processedCells}/${totalCells})`
+                        });
+
                     } catch (batchErr) {
-                        console.error('Batch translation error:', batchErr);
-                        // Continue with next batch even if one fails
+                        console.error('Batch error:', batchErr);
                         processedCells += batch.length;
                     }
                 }
-
-                translatedSheetsData[sheetName] = translatedRows;
             }
 
-            // Update preview with translated data for selected sheet
-            if (translatedSheetsData[selectedSheet]) {
-                setTranslatedData(translatedSheetsData[selectedSheet]);
-            }
+            setTranslatedWorkbook(translatedWb);
 
-            // Create translated workbook
-            const newWb = XLSX.utils.book_new();
-            sheetsToTranslate.forEach(sheetName => {
-                const data = translatedSheetsData[sheetName] || allSheetsData[sheetName] || [];
-                const newWs = XLSX.utils.aoa_to_sheet(data);
+            // Update preview for selected sheet
+            setTranslatedData(parseSheetForPreview(translatedWb, selectedSheet));
 
-                // Try to copy column widths from original
-                const originalSheet = workbook.Sheets[sheetName];
-                if (originalSheet['!cols']) {
-                    newWs['!cols'] = originalSheet['!cols'];
-                }
-                if (originalSheet['!rows']) {
-                    newWs['!rows'] = originalSheet['!rows'];
-                }
-                if (originalSheet['!merges']) {
-                    newWs['!merges'] = originalSheet['!merges'];
-                }
-
-                XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
-            });
-            setTranslatedWorkbook(newWb);
-
-            // Phase 2: Translate images
-            if (images.length > 0) {
-                setProgress({ current: processedCells, total: totalItems, phase: 'Translating images...' });
-
-                const translatedImages = [...images];
-
-                for (let i = 0; i < images.length; i++) {
-                    const img = images[i];
-                    setProgress({
-                        current: processedCells + i + 1,
-                        total: totalItems,
-                        phase: `Translating image ${i + 1} of ${images.length}...`
-                    });
-
-                    try {
-                        const response = await fetch(`${BACKEND_URL}/api/translate/gemini-vision`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                model: model || 'gemini-2.5-flash',
-                                prompt: customPrompt,
-                                imageBase64: img.data,
-                                mimeType: img.mimeType
-                            })
-                        });
-
-                        if (response.ok) {
-                            const result = await response.json();
-                            translatedImages[i] = {
-                                ...img,
-                                translated: result
-                            };
-                        }
-                    } catch (imgErr) {
-                        console.error(`Error translating image ${i}:`, imgErr);
-                        translatedImages[i] = {
-                            ...img,
-                            translated: { error: imgErr.message }
-                        };
-                    }
-                }
-
-                setImageTranslations(translatedImages);
-            }
-
-            setProgress({ current: totalItems, total: totalItems, phase: 'Translation complete!' });
+            setProgress({ current: totalCells, total: totalCells, phase: 'Translation complete!' });
 
         } catch (err) {
             setError(`Translation error: ${err.message}`);
@@ -453,30 +314,30 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
         }
     };
 
-    // Download translated Excel
+    // Download translated Excel - preserves original structure
     const downloadTranslatedExcel = () => {
         if (!translatedWorkbook) return;
 
-        // Generate filename
         const originalName = file?.name?.replace(/\.(xlsx|xls)$/i, '') || 'document';
         const filename = `${originalName}_translated.xlsx`;
 
-        // Download
-        XLSX.writeFile(translatedWorkbook, filename);
+        XLSX.writeFile(translatedWorkbook, filename, {
+            bookSST: true,
+            bookType: 'xlsx',
+            cellStyles: true
+        });
     };
 
     // Clear all
     const clearAll = () => {
         setFile(null);
+        setOriginalArrayBuffer(null);
         setWorkbook(null);
         setSheets([]);
         setSelectedSheet('');
-        setAllSheetsData({});
         setPreviewData([]);
-        setImages([]);
         setTranslatedWorkbook(null);
         setTranslatedData([]);
-        setImageTranslations([]);
         setError('');
         setProgress({ current: 0, total: 0, phase: '' });
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -494,19 +355,46 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                     </div>
                     <div>
                         <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Excel Translation</h2>
-                        <p className="text-sm text-slate-500 dark:text-slate-400">Translate spreadsheet cells and embedded images</p>
+                        <p className="text-sm text-slate-500 dark:text-slate-400">Translate cells while preserving formatting</p>
                     </div>
                 </div>
 
-                {file && (
+                <div className="flex items-center gap-2">
                     <button
-                        onClick={clearAll}
-                        className="px-3 py-1.5 text-sm text-slate-600 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 transition-colors"
+                        onClick={() => setShowSettings(!showSettings)}
+                        className={`p-2 rounded-lg transition-colors ${showSettings ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700'}`}
+                        title="Translation Settings"
                     >
-                        Clear
+                        <Settings className="w-5 h-5" />
                     </button>
-                )}
+                    {file && (
+                        <button
+                            onClick={clearAll}
+                            className="px-3 py-1.5 text-sm text-slate-600 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 transition-colors"
+                        >
+                            Clear
+                        </button>
+                    )}
+                </div>
             </div>
+
+            {/* Settings Panel */}
+            {showSettings && (
+                <div className="px-6 py-4 bg-slate-100 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                        Excel Translation Prompt
+                    </label>
+                    <textarea
+                        value={excelPrompt}
+                        onChange={(e) => setExcelPrompt(e.target.value)}
+                        placeholder="Enter your translation instructions..."
+                        className="w-full h-24 px-3 py-2 text-sm bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                    />
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                        This prompt is used specifically for Excel translation. The cell formatting instructions are added automatically.
+                    </p>
+                </div>
+            )}
 
             <div className="flex-1 overflow-auto p-6">
                 {/* Error Display */}
@@ -546,12 +434,12 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                             or click to browse (.xlsx, .xls)
                         </p>
                         <p className="text-xs text-slate-400 dark:text-slate-500">
-                            Supports all sheets, text cells, and embedded images
+                            ✓ Preserves formatting, images, charts, and tables
                         </p>
                     </div>
                 )}
 
-                {/* File Loaded - Preview & Translation */}
+                {/* File Loaded */}
                 {file && (
                     <div className="space-y-6">
                         {/* File Info & Controls */}
@@ -564,13 +452,12 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                                     <div>
                                         <p className="font-medium text-slate-900 dark:text-white">{file.name}</p>
                                         <p className="text-sm text-slate-500 dark:text-slate-400">
-                                            {sheets.length} sheet(s) • {totalCellsCount} translatable cells • {images.length} images
+                                            {sheets.length} sheet(s) • {totalCellsCount} translatable cells
                                         </p>
                                     </div>
                                 </div>
 
                                 <div className="flex items-center gap-3 flex-wrap">
-                                    {/* Translate All Sheets Toggle */}
                                     <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400 cursor-pointer">
                                         <input
                                             type="checkbox"
@@ -582,7 +469,6 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                                         All sheets
                                     </label>
 
-                                    {/* Sheet selector for preview */}
                                     {sheets.length > 1 && (
                                         <select
                                             value={selectedSheet}
@@ -608,7 +494,7 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                                         ) : (
                                             <>
                                                 <Languages className="w-4 h-4" />
-                                                Translate {translateAllSheets ? 'All' : 'Sheet'}
+                                                Translate
                                             </>
                                         )}
                                     </button>
@@ -650,8 +536,8 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                                         key={sheet}
                                         onClick={() => handleSheetChange(sheet)}
                                         className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap transition-colors ${selectedSheet === sheet
-                                            ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
-                                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                                ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
+                                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
                                             }`}
                                     >
                                         {sheet}
@@ -660,11 +546,11 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                             </div>
                         )}
 
-                        {/* Data Preview / Translated Data */}
+                        {/* Data Preview */}
                         <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
                             <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
                                 <h3 className="font-medium text-slate-900 dark:text-white">
-                                    {translatedData.length > 0 ? 'Translated Content' : 'Original Content'} - {selectedSheet}
+                                    {translatedData.length > 0 ? '✓ Translated' : 'Preview'} - {selectedSheet}
                                 </h3>
                                 <span className="text-xs text-slate-500">
                                     {(translatedData.length > 0 ? translatedData : previewData).length} rows
@@ -675,14 +561,17 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                                     <tbody>
                                         {(translatedData.length > 0 ? translatedData : previewData).slice(0, 100).map((row, rowIndex) => (
                                             <tr key={rowIndex} className="border-b border-slate-100 dark:border-slate-700 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-700/30">
-                                                <td className="px-2 py-1 text-xs text-slate-400 border-r border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 w-8">
+                                                <td className="px-2 py-1 text-xs text-slate-400 border-r border-slate-100 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 w-8 text-center">
                                                     {rowIndex + 1}
                                                 </td>
                                                 {Array.isArray(row) && row.map((cell, colIndex) => (
                                                     <td
                                                         key={colIndex}
-                                                        className="px-3 py-2 text-slate-700 dark:text-slate-300 border-r border-slate-100 dark:border-slate-700 last:border-0 max-w-xs"
-                                                        title={String(cell)}
+                                                        className={`px-3 py-2 border-r border-slate-100 dark:border-slate-700 last:border-0 max-w-xs ${hasTranslatableText(cell)
+                                                                ? 'text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-900/20'
+                                                                : 'text-slate-700 dark:text-slate-300'
+                                                            }`}
+                                                        title={String(cell || '')}
                                                     >
                                                         <div className="truncate max-w-[200px]">
                                                             {String(cell || '')}
@@ -701,86 +590,13 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình
                             </div>
                         </div>
 
-                        {/* Image Translations */}
-                        {(images.length > 0 || imageTranslations.length > 0) && (
-                            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-                                <button
-                                    onClick={() => setShowImageResults(!showImageResults)}
-                                    className="w-full px-4 py-3 flex items-center justify-between border-b border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors"
-                                >
-                                    <div className="flex items-center gap-2">
-                                        <Image className="w-4 h-4 text-slate-500" />
-                                        <h3 className="font-medium text-slate-900 dark:text-white">
-                                            Image Translations ({images.length})
-                                        </h3>
-                                    </div>
-                                    {showImageResults ? (
-                                        <ChevronUp className="w-4 h-4 text-slate-400" />
-                                    ) : (
-                                        <ChevronDown className="w-4 h-4 text-slate-400" />
-                                    )}
-                                </button>
-
-                                {showImageResults && (
-                                    <div className="p-4 space-y-4">
-                                        {imageTranslations.length > 0 ? (
-                                            imageTranslations.map((img, index) => (
-                                                <div key={img.id} className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                                                    <div className="flex items-start gap-4">
-                                                        <div className="w-24 h-24 bg-slate-200 dark:bg-slate-600 rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
-                                                            {img.data ? (
-                                                                <img
-                                                                    src={`data:${img.mimeType};base64,${img.data}`}
-                                                                    alt={img.name}
-                                                                    className="w-full h-full object-cover"
-                                                                />
-                                                            ) : (
-                                                                <Image className="w-8 h-8 text-slate-400" />
-                                                            )}
-                                                        </div>
-                                                        <div className="flex-1 min-w-0">
-                                                            <p className="font-medium text-slate-900 dark:text-white mb-2">{img.name}</p>
-                                                            {img.translated?.error ? (
-                                                                <p className="text-red-500 text-sm">Error: {img.translated.error}</p>
-                                                            ) : img.translated?.hasText === false ? (
-                                                                <p className="text-slate-500 text-sm italic">No text found in this image</p>
-                                                            ) : img.translated ? (
-                                                                <div className="space-y-2">
-                                                                    {img.translated.extractedText && (
-                                                                        <div>
-                                                                            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Original text:</p>
-                                                                            <p className="text-sm text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-600">
-                                                                                {img.translated.extractedText}
-                                                                            </p>
-                                                                        </div>
-                                                                    )}
-                                                                    {img.translated.translatedText && (
-                                                                        <div>
-                                                                            <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400 mb-1">Translated:</p>
-                                                                            <p className="text-sm text-slate-700 dark:text-slate-300 bg-emerald-50 dark:bg-emerald-900/20 p-2 rounded border border-emerald-200 dark:border-emerald-800">
-                                                                                {img.translated.translatedText}
-                                                                            </p>
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            ) : (
-                                                                <p className="text-slate-400 text-sm">Not yet translated</p>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            ))
-                                        ) : (
-                                            <div className="text-center py-8 text-slate-500 dark:text-slate-400">
-                                                <Image className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                                <p>{images.length} image(s) detected</p>
-                                                <p className="text-sm">Click "Translate All" to extract and translate text from images</p>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        )}
+                        {/* Info Box */}
+                        <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                            <p className="text-sm text-blue-700 dark:text-blue-300">
+                                <strong>ℹ️ Note:</strong> The translated file preserves all original formatting, charts, images, and formulas.
+                                Only text cells containing Japanese/Chinese characters (highlighted in purple) are translated.
+                            </p>
+                        </div>
                     </div>
                 )}
             </div>
