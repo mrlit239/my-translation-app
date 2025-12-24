@@ -1,10 +1,10 @@
 import React, { useState, useRef, useCallback } from 'react';
-import { Upload, FileSpreadsheet, Languages, Download, Loader2, AlertCircle, CheckCircle, X, ChevronDown, ChevronUp, Layers, Settings } from 'lucide-react';
+import { Upload, FileSpreadsheet, Languages, Download, Loader2, AlertCircle, CheckCircle, X, ChevronDown, ChevronUp, Layers } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { BACKEND_URL } from '../constants/apiConfig';
 
 export default function ExcelTranslationPanel({
-    customPrompt: globalCustomPrompt,
+    customPrompt,
     model,
     apiKey,
     onBack
@@ -22,12 +22,6 @@ export default function ExcelTranslationPanel({
     const [translatedData, setTranslatedData] = useState([]);
     const [error, setError] = useState('');
     const [translateAllSheets, setTranslateAllSheets] = useState(true);
-    const [showSettings, setShowSettings] = useState(false);
-
-    // Custom prompt for Excel (separate from text translation)
-    const [excelPrompt, setExcelPrompt] = useState(
-        'Translate the following Japanese text to Vietnamese. Maintain professional tone. Preserve technical terms, proper nouns, file names, and formatting.'
-    );
 
     const fileInputRef = useRef(null);
     const dropZoneRef = useRef(null);
@@ -241,13 +235,14 @@ export default function ExcelTranslationPanel({
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                                 model: model || 'gemini-3-flash',
-                                prompt: `${excelPrompt}
+                                prompt: `${customPrompt || 'Translate the following Japanese/Chinese text to Vietnamese. Maintain professional tone.'}
 
-EXCEL CELL FORMAT:
-- Each cell is marked with 【number】
-- Translate each cell and KEEP the 【number】 markers
-- Keep translations concise (spreadsheet cells)
-- Output: 【0】translation【1】translation...
+EXCEL CELL FORMAT RULES:
+- Each cell is marked with 【number】 (e.g., 【0】, 【1】)
+- Translate each cell and KEEP the 【number】 markers in your output
+- Keep translations concise - these are spreadsheet cells
+- Preserve numbers, dates, file names, and technical terms
+- Output format: 【0】translation【1】translation...
 
 Example:
 Input: 【0】給与計算【1】自動化ツール
@@ -360,13 +355,6 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa`,
                 </div>
 
                 <div className="flex items-center gap-2">
-                    <button
-                        onClick={() => setShowSettings(!showSettings)}
-                        className={`p-2 rounded-lg transition-colors ${showSettings ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700'}`}
-                        title="Translation Settings"
-                    >
-                        <Settings className="w-5 h-5" />
-                    </button>
                     {file && (
                         <button
                             onClick={clearAll}
@@ -378,23 +366,10 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa`,
                 </div>
             </div>
 
-            {/* Settings Panel */}
-            {showSettings && (
-                <div className="px-6 py-4 bg-slate-100 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
-                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                        Excel Translation Prompt
-                    </label>
-                    <textarea
-                        value={excelPrompt}
-                        onChange={(e) => setExcelPrompt(e.target.value)}
-                        placeholder="Enter your translation instructions..."
-                        className="w-full h-24 px-3 py-2 text-sm bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
-                    />
-                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                        This prompt is used specifically for Excel translation. The cell formatting instructions are added automatically.
-                    </p>
-                </div>
-            )}
+            {/* Prompt Info Banner */}
+            <div className="px-6 py-2 bg-slate-100 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">
+                📝 Using sidebar prompt: "{(customPrompt || 'Default').substring(0, 60)}..."
+            </div>
 
             <div className="flex-1 overflow-auto p-6">
                 {/* Error Display */}
@@ -536,8 +511,8 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa`,
                                         key={sheet}
                                         onClick={() => handleSheetChange(sheet)}
                                         className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap transition-colors ${selectedSheet === sheet
-                                                ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
-                                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                            ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
+                                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
                                             }`}
                                     >
                                         {sheet}
@@ -568,8 +543,8 @@ Output: 【0】Tính lương【1】Công cụ tự động hóa`,
                                                     <td
                                                         key={colIndex}
                                                         className={`px-3 py-2 border-r border-slate-100 dark:border-slate-700 last:border-0 max-w-xs ${hasTranslatableText(cell)
-                                                                ? 'text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-900/20'
-                                                                : 'text-slate-700 dark:text-slate-300'
+                                                            ? 'text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-900/20'
+                                                            : 'text-slate-700 dark:text-slate-300'
                                                             }`}
                                                         title={String(cell || '')}
                                                     >
