@@ -308,20 +308,25 @@ export default function ExcelTranslationPanel({
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                model: model || 'gemini-2.5-flash',
-                                prompt: `${customPrompt}
+                                model: model || 'gemini-3-flash',
+                                prompt: `You are a professional document translator. Translate the following Japanese/Chinese text to Vietnamese.
 
-IMPORTANT INSTRUCTIONS FOR EXCEL CELL TRANSLATION:
-1. You are translating cells from an Excel spreadsheet
-2. Each cell is marked with 【number】 (e.g., 【0】, 【1】, 【2】)
-3. Translate each cell and KEEP the 【number】 markers in your output
-4. Keep translations concise - these are spreadsheet cells
-5. Preserve any numbers, dates, or technical terms
-6. Output format must be: 【0】translated text【1】translated text...
+TRANSLATION GUIDELINES:
+- This is a business/technical document (spreadsheet)
+- Maintain professional and formal tone
+- Preserve technical terms and proper nouns when appropriate
+- Keep translations concise and accurate
+- Preserve any numbers, dates, file names, or code references exactly as they appear
+
+EXCEL CELL FORMATTING INSTRUCTIONS:
+1. Each cell is marked with 【number】 (e.g., 【0】, 【1】, 【2】)
+2. Translate each cell and KEEP the 【number】 markers in your output
+3. Keep translations concise - these are spreadsheet cells
+4. Output format must be: 【0】translated text【1】translated text...
 
 Example:
-Input: 【0】給与計算【1】自動化ツール
-Output: 【0】Payroll Calculation【1】Automation Tool`,
+Input: 【0】給与計算【1】自動化ツール【2】処理フロー
+Output: 【0】Tính lương【1】Công cụ tự động hóa【2】Quy trình xử lý`,
                                 text: batchText
                             })
                         });
@@ -645,8 +650,8 @@ Output: 【0】Payroll Calculation【1】Automation Tool`,
                                         key={sheet}
                                         onClick={() => handleSheetChange(sheet)}
                                         className={`px-3 py-1.5 text-sm font-medium rounded-lg whitespace-nowrap transition-colors ${selectedSheet === sheet
-                                                ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
-                                                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                            ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'
+                                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
                                             }`}
                                     >
                                         {sheet}

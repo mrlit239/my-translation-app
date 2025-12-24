@@ -12,8 +12,12 @@ export const apiProviders = {
     gemini: {
         name: 'Google Gemini',
         models: [
+            'gemini-3-flash',
+            'gemini-3-pro',
             'gemini-2.5-pro',
-            'gemini-2.5-flash'
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-2.0-flash-lite'
         ],
         endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/',
         requiresKey: true,
