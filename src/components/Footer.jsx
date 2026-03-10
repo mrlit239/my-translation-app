@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, SkipForward, BookOpen, Check, StopCircle, FastForward, RotateCcw } from 'lucide-react';
+import { BookOpen, FastForward, Play, RotateCcw, SkipForward, StopCircle } from 'lucide-react';
 
 export default function Footer({
     chapters,
@@ -10,6 +10,11 @@ export default function Footer({
     stopTranslation,
     progress,
     onContinue,
+    canContinue = false,
+    onSkipChunk,
+    canSkipChunk = false,
+    continueChapterLabel = 1,
+    chunkIssueMessage = '',
     rangeStart,
     setRangeStart,
     rangeEnd,
@@ -18,125 +23,127 @@ export default function Footer({
     setAutoContinueOnError
 }) {
     return (
-        <div className="h-20 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between px-6 flex-shrink-0 z-10 transition-colors duration-200">
-            <div className="flex items-center gap-4 flex-1">
-                {chapters.length > 0 ? (
-                    <div className="flex items-center gap-2">
-                        <select
-                            value={selectedChapter}
-                            onChange={(e) => setSelectedChapter(parseInt(e.target.value))}
-                            className="px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none min-w-[200px] text-slate-900 dark:text-slate-200"
-                        >
-                            {chapters.map((chap, i) => (
-                                <option key={i} value={i}>{i + 1}. {chap.title} ({chap.charCount}c)</option>
-                            ))}
-                        </select>
-                        <span className="text-sm text-slate-500 dark:text-slate-400">{chapters.length} chapters</span>
-                    </div>
-                ) : (
-                    <span className="text-sm text-slate-400 dark:text-slate-500">No chapters detected</span>
-                )}
-            </div>
+        <div className="border-t border-slate-200 bg-slate-50/90 px-5 py-3 dark:border-slate-800 dark:bg-slate-950/80">
+            {chunkIssueMessage && (
+                <div className="mb-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-200">
+                    {chunkIssueMessage}
+                </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                    {chapters.length > 0 ? (
+                        <>
+                            <select
+                                value={selectedChapter}
+                                onChange={(e) => setSelectedChapter(parseInt(e.target.value, 10))}
+                                className="min-w-[220px] rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-blue-900/40"
+                            >
+                                {chapters.map((chapter, index) => (
+                                    <option key={index} value={index}>
+                                        {index + 1}. {chapter.title} ({chapter.charCount}c)
+                                    </option>
+                                ))}
+                            </select>
+                            <span className="text-sm text-slate-500 dark:text-slate-400">{chapters.length} chapters</span>
+                        </>
+                    ) : (
+                        <span className="text-sm text-slate-400 dark:text-slate-500">No chapters detected</span>
+                    )}
+                </div>
 
-            <div className="flex items-center gap-3">
-                {isTranslating ? (
-                    <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-4 bg-slate-50 dark:bg-slate-800 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700">
-                            <div className="flex flex-col min-w-[200px]">
-                                <div className="flex justify-between text-xs mb-1">
-                                    <span className="font-medium text-slate-700 dark:text-slate-300">Translating...</span>
-                                    <span className="text-slate-500 dark:text-slate-400">{progress.percent}%</span>
+                <div className="flex flex-wrap items-center gap-2">
+                    {isTranslating ? (
+                        <>
+                            <div className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                                <div className="mb-1 flex items-center justify-between gap-3">
+                                    <span className="font-medium">Translating</span>
+                                    <span>{progress.percent}%</span>
                                 </div>
-                                <div className="h-1.5 w-full bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
-                                    <div
-                                        className="h-full bg-indigo-600 transition-all duration-300 ease-out"
-                                        style={{ width: `${progress.percent}%` }}
-                                    ></div>
+                                <div className="h-1.5 w-40 overflow-hidden rounded-full bg-slate-300 dark:bg-slate-700">
+                                    <div className="h-full bg-blue-600 transition-all duration-300" style={{ width: `${progress.percent}%` }} />
                                 </div>
                             </div>
-                        </div>
-                        <button
-                            onClick={stopTranslation}
-                            className="flex items-center gap-2 px-4 py-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/30 text-red-600 dark:text-red-400 rounded-lg text-sm font-medium transition-colors"
-                        >
-                            <StopCircle className="w-4 h-4" /> Stop
-                        </button>
-                    </div>
-                ) : (
-                    <>
-                        {progress.current > 0 && progress.current < chapters.length && (
                             <button
-                                onClick={onContinue}
-                                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-medium shadow-sm shadow-emerald-200 dark:shadow-none transition-all active:scale-95"
+                                onClick={stopTranslation}
+                                className="inline-flex items-center gap-2 rounded-xl border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-900/30 dark:text-rose-300 dark:hover:bg-rose-900/40"
                             >
-                                <FastForward className="w-4 h-4" /> Continue (Ch {progress.current + 1})
+                                <StopCircle className="h-4 w-4" /> Stop
                             </button>
-                        )}
-                        <button
-                            onClick={() => translateText('single', selectedChapter)}
-                            disabled={isTranslating}
-                            className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                        >
-                            <Play className="w-4 h-4 text-indigo-600 dark:text-indigo-400" /> Translate Chapter
-                        </button>
+                        </>
+                    ) : (
+                        <>
+                            {canContinue && (
+                                <button
+                                    onClick={onContinue}
+                                    className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 transition hover:bg-blue-100 dark:border-blue-900/60 dark:bg-blue-900/30 dark:text-blue-300 dark:hover:bg-blue-900/40"
+                                >
+                                    <FastForward className="h-4 w-4" /> Retry Chunk (Ch {continueChapterLabel})
+                                </button>
+                            )}
+                            {canSkipChunk && (
+                                <button
+                                    onClick={onSkipChunk}
+                                    className="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-900/60 dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/40"
+                                >
+                                    <SkipForward className="h-4 w-4" /> Next Chunk
+                                </button>
+                            )}
 
-                        {/* Range Translation */}
-                        <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700">
-                            <span className="text-xs text-slate-500 font-medium">Range:</span>
-                            <input
-                                type="number"
-                                min="1"
-                                max={chapters.length}
-                                value={rangeStart}
-                                onChange={(e) => setRangeStart(Math.max(1, Math.min(chapters.length, parseInt(e.target.value) || 1)))}
-                                className="w-12 px-1 py-1 text-xs text-center border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 focus:ring-1 focus:ring-indigo-500 outline-none"
-                            />
-                            <span className="text-slate-400">-</span>
-                            <input
-                                type="number"
-                                min="1"
-                                max={chapters.length}
-                                value={rangeEnd}
-                                onChange={(e) => setRangeEnd(Math.max(1, Math.min(chapters.length, parseInt(e.target.value) || 1)))}
-                                className="w-12 px-1 py-1 text-xs text-center border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 focus:ring-1 focus:ring-indigo-500 outline-none"
-                            />
                             <button
-                                onClick={() => translateText('range')}
-                                disabled={isTranslating}
-                                className="p-1 hover:bg-indigo-100 dark:hover:bg-indigo-900/30 rounded text-indigo-600 dark:text-indigo-400 transition-colors"
-                                title="Translate Range"
+                                onClick={() => translateText('single', selectedChapter)}
+                                className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                             >
-                                <Play className="w-3 h-3" />
+                                <Play className="h-4 w-4 text-blue-600 dark:text-blue-400" /> Translate Chapter
                             </button>
-                        </div>
 
-                        <button
-                            onClick={() => translateText('all')}
-                            disabled={isTranslating}
-                            className="flex items-center gap-2 px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium shadow-sm shadow-indigo-200 dark:shadow-none transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100"
-                        >
-                            <BookOpen className="w-4 h-4" /> Translate All
-                        </button>
-
-                        {/* Auto-Continue Toggle */}
-                        <div
-                            className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-all ${autoContinueOnError
-                                ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700'
-                                : 'bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700'
-                                }`}
-                            onClick={() => setAutoContinueOnError(!autoContinueOnError)}
-                            title="When enabled, automatically retry and continue translation when errors occur (max 3 retries)"
-                        >
-                            <RotateCcw className={`w-4 h-4 ${autoContinueOnError ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}`} />
-                            <span className={`text-xs font-medium ${autoContinueOnError ? 'text-amber-700 dark:text-amber-300' : 'text-slate-500 dark:text-slate-400'}`}>
-                                Auto-Continue
-                            </span>
-                            <div className={`w-8 h-4 rounded-full transition-colors ${autoContinueOnError ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-600'}`}>
-                                <div className={`w-3 h-3 rounded-full bg-white shadow transition-transform mt-0.5 ${autoContinueOnError ? 'translate-x-4 ml-0.5' : 'translate-x-0.5'}`}></div>
+                            <div className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-900">
+                                <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Range</span>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max={chapters.length || 1}
+                                    value={rangeStart}
+                                    onChange={(e) => setRangeStart(Math.max(1, Math.min(chapters.length || 1, parseInt(e.target.value, 10) || 1)))}
+                                    className="w-14 rounded border border-slate-300 bg-white px-1.5 py-1 text-center text-xs text-slate-800 outline-none focus:border-blue-500 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                                />
+                                <span className="text-slate-400">-</span>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max={chapters.length || 1}
+                                    value={rangeEnd}
+                                    onChange={(e) => setRangeEnd(Math.max(1, Math.min(chapters.length || 1, parseInt(e.target.value, 10) || 1)))}
+                                    className="w-14 rounded border border-slate-300 bg-white px-1.5 py-1 text-center text-xs text-slate-800 outline-none focus:border-blue-500 dark:border-slate-600 dark:bg-slate-950 dark:text-slate-100"
+                                />
+                                <button
+                                    onClick={() => translateText('range')}
+                                    className="rounded p-1 text-blue-600 transition hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
+                                    title="Translate range"
+                                >
+                                    <Play className="h-3.5 w-3.5" />
+                                </button>
                             </div>
-                        </div>
-                    </>
-                )}
+
+                            <button
+                                onClick={() => translateText('all')}
+                                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
+                            >
+                                <BookOpen className="h-4 w-4" /> Translate All
+                            </button>
+
+                            <button
+                                onClick={() => setAutoContinueOnError(!autoContinueOnError)}
+                                className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition ${autoContinueOnError
+                                    ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900/60 dark:bg-blue-900/30 dark:text-blue-300'
+                                    : 'border-slate-300 bg-white text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:bg-slate-800'
+                                    }`}
+                                title="Automatically retry and continue translation when recoverable errors happen"
+                            >
+                                <RotateCcw className="h-3.5 w-3.5" /> Auto-Continue
+                            </button>
+                        </>
+                    )}
+                </div>
             </div>
         </div>
     );

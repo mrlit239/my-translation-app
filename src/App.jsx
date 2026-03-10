@@ -1,15 +1,38 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Client } from "@gradio/client";
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import TranslationPanel from './components/TranslationPanel';
-import ExcelTranslationPanel from './components/ExcelTranslationPanel';
 import Footer from './components/Footer';
 import { apiProviders, BACKEND_URL } from './constants/apiConfig';
 // import { supabase, isSupabaseConfigured } from './lib/supabase';
 // import AuthModal from './components/AuthModal';
 
 export default function TranslationTool() {
+  const createResumeState = (overrides = {}) => ({
+    mode: 'all',
+    chapterIndex: 0,
+    chunkIndex: 0,
+    rangeStart: 1,
+    rangeEnd: 1,
+    hasCheckpoint: false,
+    ...overrides
+  });
+
+  const createSourceFocusState = (overrides = {}) => ({
+    active: false,
+    start: 0,
+    end: 0,
+    token: 0,
+    ...overrides
+  });
+
+  const createChunkIssueState = (overrides = {}) => ({
+    hasIssue: false,
+    message: '',
+    isRestricted: false,
+    ...overrides
+  });
+
   // State
   // Auth (Temporarily disabled)
   // const [user, setUser] = useState(null);
@@ -131,7 +154,10 @@ export default function TranslationTool() {
     detectedChapters: 0,
     selectedChapter: 0,
     showChapterPreview: false,
-    uploadedFileName: ''
+    uploadedFileName: '',
+    resume: createResumeState(),
+    sourceFocus: createSourceFocusState(),
+    chunkIssue: createChunkIssueState()
   }]);
   const [activeTabId, setActiveTabId] = useState('tab-1');
 
@@ -140,23 +166,18 @@ export default function TranslationTool() {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
   const [language, setLanguage] = useState('Auto-detect');
-  const [customPrompt, setCustomPrompt] = useState('Translate to Vietnamese. Context: BDSM/Adult Fiction. Rules: 1. Maintain raw, intense tone & precise mechanics/terminology. 2. No censorship. 3. Fluent, literary style. 4. Translate ALL source text; do NOT leave any Chinese/foreign characters. 5. Output ONLY translation.');
-  const [excelPrompt, setExcelPrompt] = useState('Translate to Vietnamese. Context: Business/Technical Document. Rules: 1. Maintain professional, formal tone. 2. Preserve technical terms, file names, and proper nouns. 3. Keep translations concise (spreadsheet cells). 4. Translate ALL Japanese/Chinese text. 5. Output ONLY translation.');
+  const [customPrompt, setCustomPrompt] = useState('Translate to Vietnamese. Context: adult fiction. Rules: 1) Keep tone intense and precise. 2) No censorship. 3) Output only translated text. 4) Keep English/Latin names exactly unchanged. 5) Romanize non-Latin names (Chinese/Japanese/Korean) into alphabet consistently throughout.');
   const [glossary, setGlossary] = useState([]);
-  const [outputFormat, setOutputFormat] = useState('txt');
-
-  // Translation Mode: 'text' or 'excel'
-  const [translationMode, setTranslationMode] = useState('text');
 
   // Advanced Settings (Global)
   const [chapterDetection, setChapterDetection] = useState('auto');
   const [charsPerChapter, setCharsPerChapter] = useState(8000);
-  const [longOutputThreshold, setLongOutputThreshold] = useState(5000);
-  const [longOutputMode, setLongOutputMode] = useState(false);
+  const [longOutputThreshold] = useState(5000);
+  const [longOutputMode] = useState(false);
   const [enableContextMemory, setEnableContextMemory] = useState(false);
   const [contextMemorySize, setContextMemorySize] = useState(500);
   const [autoGlossary, setAutoGlossary] = useState(false);
-  const [user, setUser] = useState(null);
+  const [user] = useState(null);
   const [rangeStart, setRangeStart] = useState(1);
   const [rangeEnd, setRangeEnd] = useState(1);
 
@@ -168,8 +189,10 @@ export default function TranslationTool() {
 
   // Track current translation session for auto-continue
   const translationSessionRef = useRef({
+    tabId: 'tab-1',
     mode: 'all',
     currentIndex: 0,
+    currentChunkIndex: 0,
     rangeStart: 1,
     rangeEnd: 1
   });
@@ -178,40 +201,38 @@ export default function TranslationTool() {
   const [rollingGlossary, setRollingGlossary] = useState([]);
 
   // Visibility state for background tab handling
-  const [isTabVisible, setIsTabVisible] = useState(true);
   const pendingUpdatesRef = useRef([]);
-  // TỰ ĐỘNG TỐI ƯU KHI CHỌN GROK
+  const tabsRef = useRef(tabs);
+  const activeTabIdRef = useRef(activeTabId);
+  // Provider-specific defaults
   useEffect(() => {
     if (apiProvider === 'grok') {
-      // Tăng chunk size lên max (Grok-4-fast có context 128k–256k tokens)
-      // Tăng chunk size vừa phải (Grok context lớn nhưng output limit vẫn có hạn)
-      // 30000 ký tự ~ 7500 tokens output -> An toàn với limit 8192 tokens của Grok
       if (charsPerChapter < 30000) {
         setCharsPerChapter(30000);
       }
-      // Bật memory + cache để rẻ hơn 75%
       if (!enableContextMemory) {
         setEnableContextMemory(true);
       }
-      // Tăng context memory cho truyện dài (100k+ ký tự)
-      // 1000 chars (~250 tokens) là mức cân bằng tốt nhất cho GIÁ RẺ và ĐỦ CONTEXT
-      // 4000 chars sẽ tốn thêm ~1000 tokens mỗi chunk (lặp lại), không tối ưu về chi phí
       if (contextMemorySize < 1000) {
         setContextMemorySize(1000);
       }
       setAutoGlossary(false);
     }
-    // TỰ ĐỘNG TỐI ƯU KHI CHỌN DEEPSEEK
-    // DeepSeek via backend proxy - use smaller chunks for faster responses
+
     if (apiProvider === 'deepseek') {
-      // 3000 ký tự ~ 1000 tokens input -> ~1500 tokens output
-      // Smaller chunks work better through the Render backend proxy (avoids timeouts)
       setCharsPerChapter(3000);
-      // Bật context memory để tận dụng cache (giảm 74% chi phí input)
       setEnableContextMemory(true);
-      // 500 chars (~125 tokens) - smaller context for backend
       setContextMemorySize(500);
-      // Tắt auto glossary để tiết kiệm output tokens
+      setAutoGlossary(false);
+    }
+
+    if (apiProvider === 'huggingface') {
+      if (!enableContextMemory) {
+        setEnableContextMemory(true);
+      }
+      if (contextMemorySize < 600) {
+        setContextMemorySize(600);
+      }
       setAutoGlossary(false);
     }
   }, [apiProvider, model]);
@@ -235,7 +256,6 @@ export default function TranslationTool() {
   useEffect(() => {
     const handleVisibilityChange = () => {
       const visible = document.visibilityState === 'visible';
-      setIsTabVisible(visible);
 
       if (visible && pendingUpdatesRef.current.length > 0) {
         // Flush pending updates when tab becomes visible
@@ -248,22 +268,22 @@ export default function TranslationTool() {
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, []);
 
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
+
   const fileInputRef = useRef(null);
   const outputRef = useRef(null);
   const abortControllerRef = useRef(null);
   const isTranslatingRef = useRef(false);
-  const commitBuffer = () => {
-    setTabs(prev => prev.map(t => {
-      if (t.id !== activeTabId) return t;
-      return {
-        ...t,
-        outputText: (t.outputText || '') + (t.streamingText || ''),
-        streamingText: ''
-      };
-    }));
-  };
+  const hfSpaceClientRef = useRef({ spaceId: '', token: '', client: null });
   // Helper to get active tab
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+  const getTabById = (id) => tabsRef.current.find(t => t.id === id);
 
   // Helper to update active tab
   const updateActiveTab = (updates) => {
@@ -272,10 +292,14 @@ export default function TranslationTool() {
     ));
   };
   // Helper to update specific tab
-  const updateTab = (id, updates) => {
-    setTabs(prev => prev.map(tab =>
-      tab.id === id ? { ...tab, ...updates } : tab
-    ));
+  const updateTab = (id, updatesOrUpdater) => {
+    setTabs(prev => prev.map(tab => {
+      if (tab.id !== id) return tab;
+      if (typeof updatesOrUpdater === 'function') {
+        return updatesOrUpdater(tab);
+      }
+      return { ...tab, ...updatesOrUpdater };
+    }));
   };
 
   // Helper to parse glossary and clean text
@@ -308,33 +332,166 @@ export default function TranslationTool() {
     return cleanText;
   };
 
+  const escapeRegExp = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const preprocessTextForTranslation = (sourceText) => {
+    const placeholderMap = {};
+    const seenNames = new Map();
+    const latinNamePattern = /\b[A-Z][A-Za-z]+(?:['ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢-][A-Za-z]+)?(?:\s+[A-Z][A-Za-z]+(?:['ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢-][A-Za-z]+)?){0,2}\b/g;
+    const commonTitleCaseWords = new Set([
+      'A', 'An', 'The', 'This', 'That', 'These', 'Those', 'And', 'But', 'Or', 'Nor', 'For', 'So', 'Yet',
+      'I', 'You', 'He', 'She', 'It', 'They', 'We', 'His', 'Her', 'Their', 'Our', 'Your',
+      'In', 'On', 'At', 'To', 'From', 'With', 'Without', 'After', 'Before', 'During', 'Under', 'Over',
+      'Chapter', 'Part', 'Book', 'Prologue', 'Epilogue'
+    ]);
+
+    let tokenIndex = 1;
+    const processedText = sourceText.replace(latinNamePattern, (match) => {
+      const normalized = match.trim();
+      if (!normalized) return match;
+
+      const isSingleWord = normalized.indexOf(' ') === -1;
+      if (isSingleWord && commonTitleCaseWords.has(normalized)) return match;
+      if (/^[IVXLCDM]+$/.test(normalized)) return match;
+
+      let token = seenNames.get(normalized);
+      if (!token) {
+        token = `[[NAME_${String(tokenIndex).padStart(3, '0')}]]`;
+        seenNames.set(normalized, token);
+        placeholderMap[token] = normalized;
+        tokenIndex += 1;
+      }
+      return token;
+    });
+
+    const nonLatinCandidates = [...new Set((sourceText.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]{1,4}/g) || []))]
+      .filter(term => term.length > 0 && term.length <= 4)
+      .slice(0, 40);
+
+    return {
+      processedText,
+      placeholderMap,
+      protectedTokens: Object.keys(placeholderMap),
+      nonLatinCandidates
+    };
+  };
+
+  const restoreProtectedNames = (translatedText, placeholderMap = {}) => {
+    let restored = translatedText || '';
+
+    Object.entries(placeholderMap).forEach(([token, value]) => {
+      restored = restored.replace(new RegExp(escapeRegExp(token), 'g'), value);
+    });
+
+    restored = restored.replace(/\[\[\s*NAME_(\d{3})\s*\]\]/g, (match, id) => {
+      const canonical = `[[NAME_${id}]]`;
+      return placeholderMap[canonical] || match;
+    });
+
+    return restored;
+  };
+
+  const finalizeTranslationOutput = (rawText, preprocessMeta) => {
+    const glossaryCleaned = processGlossary(rawText || '');
+    return restoreProtectedNames(glossaryCleaned, preprocessMeta?.placeholderMap);
+  };
+
+  const buildTermProtectionPayload = (sourceText = '') => {
+    if (!sourceText) {
+      return { processedText: sourceText, tokenToTarget: {} };
+    }
+
+    const mergedTerms = [...glossary, ...rollingGlossary];
+    if (!mergedTerms.length) {
+      return { processedText: sourceText, tokenToTarget: {} };
+    }
+
+    const uniqueBySource = new Map();
+    mergedTerms.forEach((term) => {
+      const source = (term?.source || '').trim();
+      const target = (term?.target || '').trim();
+      if (!source || !target || uniqueBySource.has(source)) return;
+      uniqueBySource.set(source, target);
+    });
+
+    const orderedTerms = Array.from(uniqueBySource.entries()).sort((a, b) => b[0].length - a[0].length);
+    let processedText = sourceText;
+    const tokenToTarget = {};
+    let tokenIndex = 1;
+
+    orderedTerms.forEach(([source, target]) => {
+      if (!processedText.includes(source)) return;
+
+      const token = `TKN${String(tokenIndex).padStart(4, '0')}X`;
+      const sourceRegex = new RegExp(escapeRegExp(source), 'g');
+
+      processedText = processedText.replace(sourceRegex, token);
+      tokenToTarget[token] = target;
+      tokenIndex += 1;
+    });
+
+    return { processedText, tokenToTarget };
+  };
+
+  const restoreProtectedTerms = (translatedText = '', tokenToTarget = {}) => {
+    let restored = translatedText || '';
+    const entries = Object.entries(tokenToTarget);
+
+    entries.forEach(([token, target]) => {
+      restored = restored.replace(new RegExp(escapeRegExp(token), 'g'), target);
+    });
+
+    // Some NMT models may insert spaces in synthetic tokens (e.g. "TKN 0001 X")
+    restored = restored.replace(/TKN\s*(\d{4})\s*X/gi, (match, id) => {
+      const canonical = `TKN${id}X`;
+      return tokenToTarget[canonical] || match;
+    });
+
+    return restored;
+  };
+
+  const getHfSpaceClient = async (spaceId, token = '') => {
+    const cleanToken = (token || '').trim();
+    const cached = hfSpaceClientRef.current;
+    if (cached.client && cached.spaceId === spaceId && cached.token === cleanToken) {
+      return cached.client;
+    }
+
+    const { Client } = await import('@gradio/client');
+    const options = cleanToken ? { hf_token: cleanToken } : {};
+    const client = await Client.connect(spaceId, options);
+
+    hfSpaceClientRef.current = {
+      spaceId,
+      token: cleanToken,
+      client
+    };
+
+    return client;
+  };
+
   // Extract character names from translation for rolling glossary (token-efficient)
   // This replaces expensive text overlap while maintaining name consistency
+  // Extract source/target name pairs to keep naming consistent across chunks
   const extractNamesFromTranslation = useCallback((originalText, translatedText) => {
     const newNames = [];
 
-    // Pattern 1: Detect Chinese names (2-4 characters, common surname patterns)
-    const chineseNamePattern = /[\u4e00-\u9fa5]{2,4}/g;
-    const chineseNames = [...new Set((originalText.match(chineseNamePattern) || []))];
+    const sourceNamePattern = /[\u4e00-\u9fff]{2,4}/g;
+    const sourceNames = [...new Set((originalText.match(sourceNamePattern) || []))];
 
-    // Pattern 2: Detect Vietnamese names in translation (capitalized words that could be names)
-    const vietnameseNamePattern = /[A-ZÀÁẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬÈÉẺẼẸÊẾỀỂỄỆÌÍỈĨỊÒÓỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÙÚỦŨỤƯỨỪỬỮỰỲÝỶỸỴĐ][a-zàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]+(?:\s+[A-ZÀÁẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬÈÉẺẼẸÊẾỀỂỄỆÌÍỈĨỊÒÓỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÙÚỦŨỤƯỨỪỬỮỰỲÝỶỸỴĐ][a-zàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]+)*/g;
-    const vietnameseNames = [...new Set((translatedText.match(vietnameseNamePattern) || []))];
+    const targetNamePattern = /\b\p{Lu}[\p{L}\p{M}'-]*(?:\s+\p{Lu}[\p{L}\p{M}'-]*){0,2}\b/gu;
+    const targetNames = [...new Set((translatedText.match(targetNamePattern) || []))];
 
-    // Filter to likely character names (exclude common Vietnamese words)
-    const commonVietnamese = ['Hắn', 'Nàng', 'Cô', 'Anh', 'Chị', 'Em', 'Người', 'Chúng', 'Họ', 'Đó', 'Này', 'Kia', 'Nếu', 'Nhưng', 'Vậy', 'Thì', 'Được', 'Không', 'Có', 'Là', 'Và', 'Của', 'Trong', 'Với', 'Cho', 'Đến', 'Từ', 'Khi', 'Nếu', 'Mà', 'Như', 'Cũng', 'Để', 'Đã', 'Sẽ', 'Đang', 'Rằng', 'Vì', 'Bởi', 'Nên', 'Sau', 'Trước'];
-    const filteredVietnamese = vietnameseNames.filter(name =>
-      !commonVietnamese.includes(name) &&
-      name.length >= 2 &&
-      !rollingGlossary.some(g => g.target === name)
-    );
+    const stopWords = new Set(['The', 'This', 'That', 'With', 'From', 'When', 'Then', 'After', 'Before', 'And', 'But']);
+    const filteredTargets = targetNames.filter((name) => (
+      !stopWords.has(name) &&
+      !rollingGlossary.some((item) => item.target === name)
+    ));
 
-    // Try to match Chinese names with Vietnamese translations by position/frequency
-    // This is a heuristic - the AI's explicit glossary output is more reliable
-    // But this provides a fallback for consistency
-    chineseNames.slice(0, 10).forEach((chName, i) => {
-      if (filteredVietnamese[i] && !rollingGlossary.some(g => g.source === chName)) {
-        newNames.push({ source: chName, target: filteredVietnamese[i] });
+    sourceNames.slice(0, 10).forEach((sourceName, index) => {
+      const targetName = filteredTargets[index];
+      if (targetName && !rollingGlossary.some((item) => item.source === sourceName)) {
+        newNames.push({ source: sourceName, target: targetName });
       }
     });
 
@@ -360,7 +517,8 @@ export default function TranslationTool() {
   }, [rollingGlossary, glossary]);
 
   const addTab = () => {
-    const newId = `tab-${Date.now()}`;
+    const randomId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    const newId = `tab-${randomId}`;
     setTabs(prev => [...prev, {
       id: newId,
       title: `Untitled ${prev.length + 1}`,
@@ -375,7 +533,10 @@ export default function TranslationTool() {
       detectedChapters: 0,
       selectedChapter: 0,
       showChapterPreview: false,
-      uploadedFileName: ''
+      uploadedFileName: '',
+      resume: createResumeState(),
+      sourceFocus: createSourceFocusState(),
+      chunkIssue: createChunkIssueState()
     }]);
     setActiveTabId(newId);
   };
@@ -383,6 +544,11 @@ export default function TranslationTool() {
   const closeTab = (id, e) => {
     e.stopPropagation();
     if (tabs.length === 1) return; // Don't close last tab
+    const tabToClose = tabs.find(t => t.id === id);
+    if (tabToClose?.isTranslating) {
+      alert('Stop translation in this tab before closing it.');
+      return;
+    }
 
     const newTabs = tabs.filter(t => t.id !== id);
     setTabs(newTabs);
@@ -430,11 +596,16 @@ export default function TranslationTool() {
       inputText: '',
       outputText: '',
       tempTranslation: '',
+      streamingText: '',
       wordCount: 0,
       chapters: [],
       showChapterPreview: false,
       selectedChapter: 0,
-      uploadedFileName: ''
+      uploadedFileName: '',
+      progress: { current: 0, total: 0, percent: 0 },
+      resume: createResumeState(),
+      sourceFocus: createSourceFocusState(),
+      chunkIssue: createChunkIssueState()
     });
     setGlossary([]); // Global glossary clear? Or maybe keep it? User asked to clear all.
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -446,7 +617,30 @@ export default function TranslationTool() {
       abortControllerRef.current = null;
     }
     isTranslatingRef.current = false;
-    updateActiveTab({ isTranslating: false });
+
+    const session = translationSessionRef.current;
+    const sessionTabId = session.tabId || activeTabIdRef.current;
+    const stopResume = createResumeState({
+      mode: session.mode || 'all',
+      chapterIndex: Math.max(0, session.currentIndex || 0),
+      chunkIndex: Math.max(0, session.currentChunkIndex || 0),
+      rangeStart: session.rangeStart || rangeStart,
+      rangeEnd: session.rangeEnd || rangeEnd,
+      hasCheckpoint: true
+    });
+
+    updateTab(sessionTabId, (t) => ({
+      ...t,
+      isTranslating: false,
+      streamingText: '',
+      resume: stopResume
+    }));
+
+    applyChunkFocus(
+      sessionTabId,
+      stopResume,
+      'Stopped at current chunk. You can retry this chunk or skip to the next chunk.'
+    );
   };
 
   const analyzeText = useCallback((text) => {
@@ -498,14 +692,13 @@ export default function TranslationTool() {
   const detectLanguage = (text) => {
     // Simple heuristic based on character sets
     const sample = text.substring(0, 500);
-    if (/[\u4e00-\u9fa5]/.test(sample)) return 'Chinese (中文)';
-    if (/[\u3040-\u309f\u30a0-\u30ff]/.test(sample)) return 'Japanese (日本語)';
-    if (/[\uac00-\ud7af]/.test(sample)) return 'Korean (한국어)';
-    if (/[а-яА-ЯёЁ]/.test(sample)) return 'Russian (Русский)';
-    if (/[à-ỹÀ-Ỹ]/.test(sample)) return 'Vietnamese (Tiếng Việt)';
+    if (/[\u4e00-\u9fa5]/.test(sample)) return 'Chinese (\u4e2d\u6587)';
+    if (/[\u3040-\u309f\u30a0-\u30ff]/.test(sample)) return 'Japanese (\u65e5\u672c\u8a9e)';
+    if (/[\uac00-\ud7af]/.test(sample)) return 'Korean (\ud55c\uad6d\uc5b4)';
+    if (/[\u0400-\u04ff]/.test(sample)) return 'Russian (\u0420\u0443\u0441\u0441\u043a\u0438\u0439)';
+    if (/[\u00c0-\u1ef9]/.test(sample)) return 'Vietnamese (Ti\u1ebfng Vi\u1ec7t)';
     return 'Auto-detect';
   };
-
   const smartChunkText = (text, maxChunkSize = 8000, overlapSize = 200) => {
     const chunks = [];
 
@@ -536,7 +729,7 @@ export default function TranslationTool() {
         chunkIndex++;
       } else if (paragraph.length > maxChunkSize) {
         // Paragraph itself is too large, split by sentences
-        const sentences = paragraph.match(/[^.!?。！？]+[.!?。！？]+/g) || [paragraph];
+        const sentences = paragraph.match(/[^.!?ÃƒÂ£Ã¢â€šÂ¬Ã¢â‚¬Å¡ÃƒÂ¯Ã‚Â¼Ã‚ÂÃƒÂ¯Ã‚Â¼Ã…Â¸]+[.!?ÃƒÂ£Ã¢â€šÂ¬Ã¢â‚¬Å¡ÃƒÂ¯Ã‚Â¼Ã‚ÂÃƒÂ¯Ã‚Â¼Ã…Â¸]+/g) || [paragraph];
 
         for (const sentence of sentences) {
           if (currentChunk.length + sentence.length > maxChunkSize && currentChunk.length > 0) {
@@ -598,11 +791,11 @@ export default function TranslationTool() {
           } else {
             // If no newline, try punctuation (Chinese/English)
             const lastPunctuation = Math.max(
-              searchWindow.lastIndexOf('。'),
+              searchWindow.lastIndexOf('ÃƒÂ£Ã¢â€šÂ¬Ã¢â‚¬Å¡'),
               searchWindow.lastIndexOf('.'),
-              searchWindow.lastIndexOf('！'),
+              searchWindow.lastIndexOf('ÃƒÂ¯Ã‚Â¼Ã‚Â'),
               searchWindow.lastIndexOf('!'),
-              searchWindow.lastIndexOf('？'),
+              searchWindow.lastIndexOf('ÃƒÂ¯Ã‚Â¼Ã…Â¸'),
               searchWindow.lastIndexOf('?')
             );
 
@@ -626,18 +819,17 @@ export default function TranslationTool() {
 
     const patterns = {
       chinese: [
-        /(?:^|\n)\s*(?:[\d_]+\s*)?第\s*[0-9一二三四五六七八九十百千万]+\s*[章卷].*/g,
-        /(?:^|\n)\s*(?:[\d_]+\s*)?第\s*[0-9一二三四五六七八九十百千万]+\s*节.*/g,
+        /(?:^|\n)\s*(?:[\d_]+\s*)?\u7b2c\s*[0-9\u4e00-\u5341\u767e\u5343\u4e07]+\s*[\u7ae0\u5377].*/g,
+        /(?:^|\n)\s*(?:[\d_]+\s*)?\u7b2c\s*[0-9\u4e00-\u5341\u767e\u5343\u4e07]+\s*\u8282.*/g,
         /(?:^|\n)\s*Chapter\s*\d+.*/gi
       ],
       japanese: [
-        /(?:^|\n)\s*第[一二三四五六七八九十百千万\d]+章[^\n]*/g,
-        /(?:^|\n)\s*第[一二三四五六七八九十百千万\d]+話[^\n]*/g,
-        /(?:^|\n)\s*[０-９0-9]+章[^\n]*/g,
-        /(?:^|\n)\s*[０-９0-9]+話[^\n]*/g
+        /(?:^|\n)\s*\u7b2c[\u4e00-\u5341\u767e\u5343\u4e07\d]+\u7ae0[^\n]*/g,
+        /(?:^|\n)\s*\u7b2c[\u4e00-\u5341\u767e\u5343\u4e07\d]+\u8a71[^\n]*/g,
+        /(?:^|\n)\s*[0-9]+\u7ae0[^\n]*/g,
+        /(?:^|\n)\s*[0-9]+\u8a71[^\n]*/g
       ]
     };
-
     const currentPatterns = language === 'chinese' ? patterns.chinese : patterns.japanese;
     const matches = [];
 
@@ -711,7 +903,7 @@ export default function TranslationTool() {
             } else if (parsed.delta && parsed.delta.text) {
               chunk = parsed.delta.text;
             }
-          } catch (e) {
+          } catch {
             // Ignore parse errors
           }
         }
@@ -752,28 +944,45 @@ export default function TranslationTool() {
     }
   };
 
-  const scrollToBottom = () => {
+  const scrollToBottom = (tabId = activeTabIdRef.current) => {
+    if (tabId !== activeTabIdRef.current) return;
     outputRef.current?.scrollTo({
       top: outputRef.current.scrollHeight,
       behavior: 'smooth'
     });
   };
 
-  const callAPI = async (text, onChunk = null, stream = true, previousContext = null) => {
+  const callAPI = async (text, onChunk = null, stream = true, previousContext = null, preprocessMeta = null) => {
     const provider = apiProviders[apiProvider];
+    const modelValue = String(model || '');
+    const isPublicHfSpaceModel = apiProvider === 'huggingface' && (
+      modelValue.startsWith('space:') ||
+      modelValue.includes('doof-ferb/hirashiba-mt-zh-vi')
+    );
     // Skip API key check for backend providers (keys are server-side) or providers that don't require it
-    if (!provider?.useBackend && provider?.requiresKey !== false && !apiKey.trim()) {
+    if (!provider?.useBackend && provider?.requiresKey !== false && !apiKey.trim() && !isPublicHfSpaceModel) {
       throw new Error('Please enter your API key');
     }
 
     // Abort controller
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
+    const prepared = preprocessMeta || preprocessTextForTranslation(text);
+    const textForModel = prepared.processedText || text;
 
-    // ────────────────────── PROMPT CONSTRUCTION ──────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ PROMPT CONSTRUCTION ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     let finalPrompt = customPrompt;
 
-    finalPrompt += '\n\nIMPORTANT: This is part of a larger text. Maintain consistency with the style and terminology you\'ve been using. Do NOT output any "Translating..." text or section headers. Output ONLY the translated text.';
+    finalPrompt += '\n\nIMPORTANT: This is part of a larger text. Keep style and terminology consistent. Output translation only.';
+    finalPrompt += '\n\nNAME RULES: 1) Keep English/Latin names exactly unchanged. 2) Romanize non-Latin names (Chinese/Japanese/Korean). 3) Keep romanization consistent.';
+
+    if (prepared.protectedTokens?.length) {
+      finalPrompt += `\n\nPROTECTED NAME TOKENS:\n${prepared.protectedTokens.map(token => `- ${token}`).join('\n')}\nKeep these tokens exactly unchanged in output.`;
+    }
+
+    if (prepared.nonLatinCandidates?.length) {
+      finalPrompt += `\n\nPOSSIBLE NON-LATIN NAMES TO ROMANIZE:\n${prepared.nonLatinCandidates.map(name => `- ${name}`).join('\n')}`;
+    }
 
     // Use lightweight glossary context instead of full text (saves ~80% tokens)
     const glossaryContext = buildGlossaryContext();
@@ -783,7 +992,7 @@ export default function TranslationTool() {
 
     if (previousContext && enableContextMemory) {
       // Fallback to old method if no glossary built yet (first chunk only)
-      finalPrompt += `\n\nPREVIOUS CONTEXT (For continuity of names and style):\n${previousContext}\n\nEND OF CONTEXT\n\nIMPORTANT: You must maintain strict consistency with the names used in the PREVIOUS CONTEXT. If a character was called "Tiểu Lam" previously, do NOT switch to "Xiao Lan". Use the same naming convention.`;
+      finalPrompt += `\n\nPREVIOUS CONTEXT (For continuity of names and style):\n${previousContext}\n\nEND OF CONTEXT\n\nIMPORTANT: You must maintain strict consistency with the names used in the PREVIOUS CONTEXT. If a character was called "TiÃƒÂ¡Ã‚Â»Ã†â€™u Lam" previously, do NOT switch to "Xiao Lan". Use the same naming convention.`;
     }
 
     if (glossary.length > 0) {
@@ -797,11 +1006,11 @@ export default function TranslationTool() {
       finalPrompt += '\n\nAt the very end of your response, output a separator line "---GLOSSARY---" followed by a list of any NEW proper names or specific terms you identified and translated in this text, one per line in this format: "Source: Target". Do not include terms already in the provided glossary.';
     }
 
-    // ────────────────────── BACKEND API CALL (Server-side keys) ──────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ BACKEND API CALL (Server-side keys) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     if (provider?.useBackend) {
       try {
         console.log('[Backend] Starting request to:', `${BACKEND_URL}/api/translate/${apiProvider}`);
-        console.log('[Backend] Request payload size:', text?.length, 'chars');
+        console.log('[Backend] Request payload size:', textForModel?.length, 'chars');
 
         const response = await fetch(`${BACKEND_URL}/api/translate/${apiProvider}`, {
           method: 'POST',
@@ -809,7 +1018,7 @@ export default function TranslationTool() {
           body: JSON.stringify({
             model: model,
             prompt: finalPrompt,
-            text: text
+            text: textForModel
           }),
           signal
         });
@@ -833,114 +1042,109 @@ export default function TranslationTool() {
           onChunk(fullText);
         }
 
-        return fullText;
+        return finalizeTranslationOutput(fullText, prepared);
       } catch (error) {
         if (error.name === 'AbortError') throw error;
         throw new Error(`Backend: ${error.message}`);
       }
     }
 
-    // ────────────────────── LEGACY: Direct Browser Calls ──────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ LEGACY: Direct Browser Calls ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     if (apiProvider === 'huggingface') {
-      // Legacy support for specific Gradio Space
-      if (model.includes('doof-ferb')) {
-        const { Client } = await import('@gradio/client');
-        const client = await Client.connect("doof-ferb/hirashiba-mt-zh-vi", {
-          hf_token: apiKey.trim() || undefined
+      const selectedModel = String(model || '');
+      const isSpaceModel = selectedModel.startsWith('space:') || selectedModel.includes('doof-ferb/hirashiba-mt-zh-vi');
+
+      if (isSpaceModel) {
+        const spaceId = selectedModel.startsWith('space:') ? selectedModel.replace(/^space:/, '') : selectedModel;
+        const client = await getHfSpaceClient(spaceId, apiKey);
+        const termProtection = buildTermProtectionPayload(textForModel);
+
+        const result = await client.predict('/translate', {
+          input_text: termProtection.processedText
         });
 
-        let processedText = text;
-        // Simple pre-processing for HF MT model
-        glossary.forEach(term => {
-          if (term.source && term.target) {
-            processedText = processedText.split(term.source).join(term.target);
-          }
-        });
+        const rawTranslated = Array.isArray(result?.data)
+          ? (result.data[0] || '')
+          : (typeof result === 'string' ? result : '');
 
-        const result = await client.predict(1, [processedText]);
-        const translatedText = result.data[0];
-
-        if (onChunk) onChunk(translatedText);
-        return translatedText;
-      } else {
-        // Generic Hugging Face Inference API using HfInference
-        // We import from CDN to avoid build issues with node-only packages if any
-        const { HfInference } = await import('https://esm.sh/@huggingface/inference');
-        const hf = new HfInference(apiKey);
-
-        try {
-          // Internal chunking for HF models (max ~512 tokens)
-          // We split by sentences or just fixed length to be safe
-          const MAX_CHUNK_SIZE = 500;
-          let chunks = [];
-
-          if (text.length > MAX_CHUNK_SIZE) {
-            // Split by sentence endings first
-            const sentences = text.match(/[^.!?。！？]+[.!?。！？]+/g) || [text];
-            let currentChunk = '';
-
-            for (const sentence of sentences) {
-              if ((currentChunk + sentence).length <= MAX_CHUNK_SIZE) {
-                currentChunk += sentence;
-              } else {
-                if (currentChunk) chunks.push(currentChunk);
-                currentChunk = sentence;
-                // If a single sentence is too long, force split it
-                while (currentChunk.length > MAX_CHUNK_SIZE) {
-                  chunks.push(currentChunk.slice(0, MAX_CHUNK_SIZE));
-                  currentChunk = currentChunk.slice(MAX_CHUNK_SIZE);
-                }
-              }
-            }
-            if (currentChunk) chunks.push(currentChunk);
-          } else {
-            chunks = [text];
-          }
-
-          let finalTranslatedText = '';
-
-          for (const chunk of chunks) {
-            if (!chunk.trim()) continue;
-
-            // Try translation task
-            let chunkResult = '';
-            try {
-              const result = await hf.translation({
-                model: model,
-                inputs: chunk
-              });
-
-              if (Array.isArray(result)) {
-                chunkResult = result[0]?.translation_text || result[0]?.generated_text || JSON.stringify(result);
-              } else {
-                chunkResult = result.translation_text || result.generated_text || JSON.stringify(result);
-              }
-            } catch (err) {
-              // Fallback to text generation
-              if (err.message.includes('Task not supported') || err.message.includes('does not support')) {
-                const result = await hf.textGeneration({
-                  model: model,
-                  inputs: chunk,
-                  parameters: { max_new_tokens: 1024 }
-                });
-                chunkResult = result.generated_text;
-              } else {
-                throw err;
-              }
-            }
-
-            finalTranslatedText += chunkResult + ' ';
-            // Optional: Update progress for long chunks? 
-            // For now, just stream the result as we get it
-            if (onChunk) onChunk(chunkResult + ' ');
-          }
-
-          return finalTranslatedText.trim();
-
-        } catch (err) {
-          throw err;
-        }
+        const restoredText = restoreProtectedTerms(rawTranslated, termProtection.tokenToTarget);
+        if (onChunk && restoredText) onChunk(restoredText);
+        return finalizeTranslationOutput(restoredText, prepared);
       }
+
+      if (!apiKey.trim()) {
+        throw new Error('HF token is required for non-Space Hugging Face models.');
+      }
+
+      // Generic Hugging Face Inference API using HfInference
+      const { HfInference } = await import('https://esm.sh/@huggingface/inference');
+      const hf = new HfInference(apiKey);
+      const termProtection = buildTermProtectionPayload(textForModel);
+      const protectedInput = termProtection.processedText;
+
+      const MAX_CHUNK_SIZE = 700;
+      let chunks = [];
+
+      if (protectedInput.length > MAX_CHUNK_SIZE) {
+        const sentences = protectedInput.match(/[^.!?\\u3002\\uff01\\uff1f]+[.!?\\u3002\\uff01\\uff1f]+|.+$/g) || [protectedInput];
+        let currentChunk = '';
+
+        for (const sentence of sentences) {
+          if ((currentChunk + sentence).length <= MAX_CHUNK_SIZE) {
+            currentChunk += sentence;
+          } else {
+            if (currentChunk) chunks.push(currentChunk);
+            currentChunk = sentence;
+            while (currentChunk.length > MAX_CHUNK_SIZE) {
+              chunks.push(currentChunk.slice(0, MAX_CHUNK_SIZE));
+              currentChunk = currentChunk.slice(MAX_CHUNK_SIZE);
+            }
+          }
+        }
+        if (currentChunk) chunks.push(currentChunk);
+      } else {
+        chunks = [protectedInput];
+      }
+
+      let finalTranslatedText = '';
+
+      for (const chunk of chunks) {
+        if (!chunk.trim()) continue;
+
+        let chunkResult = '';
+        try {
+          const result = await hf.translation({
+            model: selectedModel,
+            inputs: chunk
+          });
+
+          if (Array.isArray(result)) {
+            chunkResult = result[0]?.translation_text || result[0]?.generated_text || JSON.stringify(result);
+          } else {
+            chunkResult = result.translation_text || result.generated_text || JSON.stringify(result);
+          }
+        } catch (err) {
+          if (err.message.includes('Task not supported') || err.message.includes('does not support')) {
+            const result = await hf.textGeneration({
+              model: selectedModel,
+              inputs: chunk,
+              parameters: { max_new_tokens: 1024 }
+            });
+            chunkResult = result.generated_text || '';
+            if (chunkResult.startsWith(chunk)) {
+              chunkResult = chunkResult.slice(chunk.length).trim();
+            }
+          } else {
+            throw err;
+          }
+        }
+
+        finalTranslatedText += `${chunkResult} `;
+      }
+
+      const restoredText = restoreProtectedTerms(finalTranslatedText.trim(), termProtection.tokenToTarget);
+      if (onChunk && restoredText) onChunk(restoredText);
+      return finalizeTranslationOutput(restoredText, prepared);
     }
 
     // Google Translate (Direct browser call - works only in local development due to CORS)
@@ -951,7 +1155,7 @@ export default function TranslationTool() {
         throw new Error('Google Translate only works in local development (localhost). Use AI providers for production.');
       }
 
-      const chunks = smartChunkText(text, 1500, 0); // Smaller chunks for URL limit
+      const chunks = smartChunkText(textForModel, 1500, 0); // Smaller chunks for URL limit
       let finalTranslatedText = '';
 
       for (let i = 0; i < chunks.length; i++) {
@@ -985,14 +1189,14 @@ export default function TranslationTool() {
         }
       }
 
-      return finalTranslatedText.trim();
+      return finalizeTranslationOutput(finalTranslatedText.trim(), prepared);
     }
 
     // Gemini - ALWAYS non-stream
     if (apiProvider === 'gemini') {
       const bodyData = {
         contents: [{
-          parts: [{ text: `${finalPrompt}\n\nText to translate:\n${text}` }]
+          parts: [{ text: `${finalPrompt}\n\nText to translate:\n${textForModel}` }]
         }],
         generationConfig: {
           response_mime_type: 'text/plain',
@@ -1046,7 +1250,7 @@ export default function TranslationTool() {
           await new Promise(resolve => setTimeout(resolve, 200));
         }
       }
-      return fullText;
+      return finalizeTranslationOutput(fullText, prepared);
     }
 
     // Anthropic (user key)
@@ -1057,7 +1261,7 @@ export default function TranslationTool() {
         stream: stream,
         messages: [{
           role: 'user',
-          content: `${finalPrompt}\n\nText to translate:\n${text}`
+          content: `${finalPrompt}\n\nText to translate:\n${textForModel}`
         }]
       };
 
@@ -1078,15 +1282,19 @@ export default function TranslationTool() {
       }
 
       if (stream && onChunk) {
-        await processStream(response, onChunk, (err) => { throw err; }, 'claude', signal);
-        return '';
+        let streamedText = '';
+        await processStream(response, (chunk) => {
+          streamedText += chunk;
+          onChunk(chunk);
+        }, (err) => { throw err; }, 'claude', signal);
+        return finalizeTranslationOutput(streamedText, prepared);
       } else {
         const data = await response.json();
-        return data.content[0].text;
+        return finalizeTranslationOutput(data.content[0].text, prepared);
       }
     }
 
-    // ────────────────────── DEEPSEEK (via Netlify proxy to avoid CORS) ──────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ DEEPSEEK (via Netlify proxy to avoid CORS) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     if (apiProvider === 'deepseek') {
       const proxyResponse = await fetch('/.netlify/functions/deepseek-proxy', {
         method: 'POST',
@@ -1096,7 +1304,7 @@ export default function TranslationTool() {
           model: model,
           messages: [
             { role: 'system', content: finalPrompt },
-            { role: 'user', content: `Text to translate:\n${text}` }
+            { role: 'user', content: `Text to translate:\n${textForModel}` }
           ],
         }),
         signal
@@ -1115,25 +1323,23 @@ export default function TranslationTool() {
         await simulateStreaming(fullText, onChunk, signal);
       }
 
-      return processGlossary(fullText);
+      return finalizeTranslationOutput(fullText, prepared);
     }
 
-    // ────────────────────── GROK + OPENAI + GROQ + OPENROUTER + LOCAL (TỐI ƯU HOÀN HẢO) ──────────────────────
+    // GROK + OPENAI + GROQ + OPENROUTER + LOCAL
     const isGrok = apiProvider === 'grok';
-    const isOpenAICompatible = ['openai', 'grok', 'groq', 'openrouter', 'local'].includes(apiProvider);
-
     const bodyData = {
       model: model,
       messages: (apiProvider === 'local') ? [
-        { role: 'user', content: `### Instruction:\nYou are a professional translator. Translate the following text into Vietnamese.\n\n${finalPrompt}\n\n### Input Text:\n${text}\n\n### Response (Vietnamese Translation):` }
+        { role: 'user', content: `### Instruction:\nYou are a professional translator. Translate the following text into Vietnamese.\n\n${finalPrompt}\n\n### Input Text:\n${textForModel}\n\n### Response (Vietnamese Translation):` }
       ] : [
         { role: 'system', content: finalPrompt },
-        { role: 'user', content: `Text to translate:\n${text}` }
+        { role: 'user', content: `Text to translate:\n${textForModel}` }
       ],
       max_tokens: 8192,
       temperature: 0.3,
       stream: stream,
-      // ─── LOCAL MODEL: Quality control to prevent repetition/garbage ───
+      // Local model safeguards to reduce repetition
       ...(apiProvider === 'local' && {
         repeat_penalty: 1.15,        // Penalize repetition
         top_p: 0.9,                  // Nucleus sampling
@@ -1141,12 +1347,12 @@ export default function TranslationTool() {
         presence_penalty: 0.3,       // Encourage diverse vocabulary
         stop: ['### Input', '###', '\n\n\n', '---'],  // Stop sequences
       }),
-      // ─── CHỈ GROK CÓ: Rẻ hơn 75% + Auto-glossary siêu mạnh ───
+      // Grok-specific options
       ...(isGrok && {
-        // Cache prompt → chỉ tính tiền input 1 lần cho các chunk tiếp theo
+        // Cache prompt to reduce repeated input cost across chunks
         cache_prompt: enableContextMemory === true,
 
-        // Auto extract glossary bằng tool calls -> DISABLED to prevent truncation bug
+        // Auto extract glossary bÃƒÂ¡Ã‚ÂºÃ‚Â±ng tool calls -> DISABLED to prevent truncation bug
         // We rely on text-based glossary extraction instead
         /*
         ...(autoGlossary && {
@@ -1201,11 +1407,12 @@ export default function TranslationTool() {
       throw new Error(errData.error?.message || `HTTP ${response.status}`);
     }
 
-    // ────────────────────── STREAMING (hỗ trợ Grok tool calls) ──────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ STREAMING (hÃƒÂ¡Ã‚Â»Ã¢â‚¬â€ trÃƒÂ¡Ã‚Â»Ã‚Â£ Grok tool calls) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     if (stream && onChunk) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let streamedContent = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1235,28 +1442,33 @@ export default function TranslationTool() {
                         }
                       });
                     }
-                  } catch (e) { }
+                  } catch {
+                    // Ignore malformed tool call payloads
+                  }
                 }
               });
             }
 
-            // CONTENT – LUÔN GỬI, KHÔNG BỎ SÓT
+            // CONTENT ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ LUÃƒÆ’Ã¢â‚¬ÂN GÃƒÂ¡Ã‚Â»Ã‚Â¬I, KHÃƒÆ’Ã¢â‚¬ÂNG BÃƒÂ¡Ã‚Â»Ã…Â½ SÃƒÆ’Ã¢â‚¬Å“T
             const content = delta.content || '';
-            if (content) onChunk(content);
+            if (content) {
+              streamedContent += content;
+              onChunk(content);
+            }
 
-          } catch (e) { }
+          } catch {
+            // Ignore malformed streaming chunks
+          }
         }
       }
 
-      // FORCE COMMIT SAU KHI XONG 1 CHUNK
-      commitBuffer();
-      return ''; // streaming hoàn tất
+      return finalizeTranslationOutput(streamedContent, prepared);
     }
 
-    // ────────────────────── NON-STREAM (fallback) ──────────────────────
+    // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ NON-STREAM (fallback) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     const data = await response.json();
 
-    // Xử lý tool calls trong non-stream
+    // XÃƒÂ¡Ã‚Â»Ã‚Â­ lÃƒÆ’Ã‚Â½ tool calls trong non-stream
     if (isGrok && data.choices?.[0]?.message?.tool_calls) {
       const toolCall = data.choices[0].message.tool_calls[0];
       if (toolCall?.function?.arguments) {
@@ -1269,11 +1481,11 @@ export default function TranslationTool() {
               }
             });
           }
-        } catch (e) { /* ignore */ }
+        } catch { /* ignore */ }
       }
     }
 
-    return data.choices?.[0]?.message?.content?.trim() || '';
+    return finalizeTranslationOutput(data.choices?.[0]?.message?.content?.trim() || '', prepared);
   };
 
   // Helper for simulated streaming (visibility-aware to prevent background throttling)
@@ -1330,7 +1542,7 @@ export default function TranslationTool() {
         }
 
         // Split huge paragraph
-        const sentences = paragraph.match(/[^.!?。！？]+[.!?。！？]+["']?|.+$/g) || [paragraph];
+        const sentences = paragraph.match(/[^.!?ÃƒÂ£Ã¢â€šÂ¬Ã¢â‚¬Å¡ÃƒÂ¯Ã‚Â¼Ã‚ÂÃƒÂ¯Ã‚Â¼Ã…Â¸]+[.!?ÃƒÂ£Ã¢â€šÂ¬Ã¢â‚¬Å¡ÃƒÂ¯Ã‚Â¼Ã‚ÂÃƒÂ¯Ã‚Â¼Ã…Â¸]+["']?|.+$/g) || [paragraph];
         let currentSentenceChunk = '';
 
         for (const sentence of sentences) {
@@ -1361,452 +1573,442 @@ export default function TranslationTool() {
     return chunks;
   };
 
-  const translateText = async (mode = 'all', chapterIndex = 0, argRangeStart = 0, argRangeEnd = 0) => {
-    if (!activeTab.inputText.trim()) {
+  const splitTextIntoChunkSpans = (text, maxLength = 5000) => {
+    const chunks = splitTextIntoChunks(text, maxLength);
+    const spans = [];
+    let searchFrom = 0;
+
+    chunks.forEach((content, index) => {
+      if (!content) return;
+
+      let start = text.indexOf(content, searchFrom);
+      if (start < 0) {
+        start = searchFrom;
+      }
+
+      const end = start + content.length;
+      spans.push({ index, content, start, end });
+      searchFrom = Math.max(end, searchFrom);
+    });
+
+    return spans;
+  };
+
+  const getChapterStartIndex = (tab, chapterIndex) => {
+    const chapter = tab?.chapters?.[chapterIndex];
+    if (!chapter) return 0;
+    if (chapter.startIndex !== undefined) return chapter.startIndex;
+
+    let start = 0;
+    for (let i = 0; i < chapterIndex; i++) {
+      start += tab.chapters[i]?.charCount || 0;
+    }
+    return start;
+  };
+
+  const getChunkLocation = (tab, chapterIndex, chunkIndex) => {
+    const chapter = tab?.chapters?.[chapterIndex];
+    if (!chapter) return null;
+
+    const spans = splitTextIntoChunkSpans(chapter.content);
+    if (spans.length === 0) return null;
+
+    const safeChunkIndex = Math.max(0, Math.min(chunkIndex, spans.length - 1));
+    const span = spans[safeChunkIndex];
+    const chapterStart = getChapterStartIndex(tab, chapterIndex);
+
+    return {
+      chapterIndex,
+      chunkIndex: safeChunkIndex,
+      start: chapterStart + span.start,
+      end: chapterStart + span.end
+    };
+  };
+
+  const getResumeEndAt = (tab, resumeState) => {
+    if (!tab?.chapters?.length) return 0;
+    const mode = resumeState?.mode || 'all';
+    if (mode === 'range') {
+      return Math.min(tab.chapters.length, resumeState?.rangeEnd || tab.chapters.length);
+    }
+    if (mode === 'single') {
+      return Math.min(tab.chapters.length, (resumeState?.chapterIndex || 0) + 1);
+    }
+    return tab.chapters.length;
+  };
+
+  const buildNextChunkResume = (tab, resumeState) => {
+    if (!tab?.chapters?.length) return createResumeState();
+
+    const chapterIndex = Math.max(0, resumeState?.chapterIndex || 0);
+    const chunkIndex = Math.max(0, resumeState?.chunkIndex || 0);
+    const chapter = tab.chapters[chapterIndex];
+    if (!chapter) return createResumeState();
+
+    const spans = splitTextIntoChunkSpans(chapter.content);
+    if (spans.length === 0) return createResumeState();
+
+    let nextChapterIndex = chapterIndex;
+    let nextChunkIndex = chunkIndex + 1;
+
+    if (nextChunkIndex >= spans.length) {
+      nextChapterIndex += 1;
+      nextChunkIndex = 0;
+    }
+
+    const endAt = getResumeEndAt(tab, resumeState);
+    const hasCheckpoint = nextChapterIndex < endAt;
+
+    return createResumeState({
+      mode: resumeState?.mode || 'all',
+      chapterIndex: hasCheckpoint ? nextChapterIndex : chapterIndex,
+      chunkIndex: hasCheckpoint ? nextChunkIndex : 0,
+      rangeStart: resumeState?.rangeStart || 1,
+      rangeEnd: resumeState?.rangeEnd || tab.chapters.length,
+      hasCheckpoint
+    });
+  };
+
+  const applyChunkFocus = (tabId, resumeState, issueMessage = '', isRestricted = false) => {
+    const tab = getTabById(tabId);
+    if (!tab) return;
+
+    const location = getChunkLocation(
+      tab,
+      Math.max(0, resumeState?.chapterIndex || 0),
+      Math.max(0, resumeState?.chunkIndex || 0)
+    );
+
+    updateTab(tabId, (t) => ({
+      ...t,
+      selectedChapter: location ? location.chapterIndex : t.selectedChapter,
+      sourceFocus: location ? createSourceFocusState({
+        active: true,
+        start: location.start,
+        end: location.end,
+        token: Date.now()
+      }) : createSourceFocusState(),
+      chunkIssue: issueMessage
+        ? createChunkIssueState({
+          hasIssue: true,
+          message: issueMessage,
+          isRestricted
+        })
+        : t.chunkIssue
+    }));
+  };
+
+  const isModerationBlockError = (errorMsg = '') => {
+    const normalized = String(errorMsg).toLowerCase();
+    const moderationMarkers = [
+      'content violates',
+      'usage guidelines',
+      'failed check',
+      'safety_check',
+      'safety check',
+      'blocked by safety',
+      'moderation',
+      'csam'
+    ];
+    return moderationMarkers.some((marker) => normalized.includes(marker));
+  };
+
+  const translateText = async (
+    mode = 'all',
+    chapterIndex = 0,
+    argRangeStart = 0,
+    argRangeEnd = 0,
+    argChunkIndex = 0,
+    targetTabId = activeTabIdRef.current
+  ) => {
+    const tabId = targetTabId || activeTabIdRef.current;
+    const tabSnapshot = getTabById(tabId);
+
+    if (!tabSnapshot) return;
+
+    if (isTranslatingRef.current && translationSessionRef.current.tabId && translationSessionRef.current.tabId !== tabId) {
+      alert('Another tab is currently translating. Stop it before starting translation in this tab.');
+      return;
+    }
+
+    if (!tabSnapshot.inputText.trim()) {
       alert('Please enter or upload text to translate');
       return;
     }
 
-    if (activeTab.chapters.length === 0) {
+    if (tabSnapshot.chapters.length === 0) {
       alert('No chapters detected. Please ensure text is analyzed.');
       return;
     }
 
+    const startRange = argRangeStart > 0 ? argRangeStart : rangeStart;
+    const endRange = argRangeEnd > 0 ? argRangeEnd : rangeEnd;
 
-    updateActiveTab({ isTranslating: true });
-    isTranslatingRef.current = true;
+    let startFrom = chapterIndex || 0;
+    let endAt = tabSnapshot.chapters.length;
+    let chunkStartIndex = Math.max(0, argChunkIndex || 0);
 
-    // Track session for auto-continue
+    if (mode === 'single') {
+      startFrom = Math.max(0, chapterIndex);
+      endAt = Math.min(tabSnapshot.chapters.length, startFrom + 1);
+    } else if (mode === 'next') {
+      startFrom = Math.max(0, tabSnapshot.selectedChapter || 0);
+      endAt = Math.min(tabSnapshot.chapters.length, startFrom + 1);
+    } else if (mode === 'range') {
+      const requestedStart = Math.max(0, startRange - 1);
+      const requestedEnd = Math.min(tabSnapshot.chapters.length, endRange);
+      startFrom = chapterIndex > 0 ? chapterIndex : requestedStart;
+      endAt = requestedEnd;
+    }
+
+    if (startFrom >= tabSnapshot.chapters.length || startFrom >= endAt) {
+      alert('No more chapters to translate');
+      return;
+    }
+
+    const sessionMode = mode === 'next' ? 'all' : mode;
+    const totalWorkChapters = Math.max(1, endAt - startFrom);
+
     translationSessionRef.current = {
-      mode: mode,
-      currentIndex: chapterIndex,
-      rangeStart: argRangeStart > 0 ? argRangeStart : rangeStart,
-      rangeEnd: argRangeEnd > 0 ? argRangeEnd : rangeEnd
+      tabId,
+      mode: sessionMode,
+      currentIndex: startFrom,
+      currentChunkIndex: chunkStartIndex,
+      rangeStart: startRange,
+      rangeEnd: endRange
     };
 
-    // Reset rolling glossary for new translation session (keeps user glossary)
-    if (mode === 'all' || (mode === 'range' && (argRangeStart <= 1 || rangeStart <= 1))) {
+    if (sessionMode === 'all' && startFrom === 0 && chunkStartIndex === 0) {
       setRollingGlossary([]);
     }
 
+    updateTab(tabId, (t) => ({
+      ...t,
+      isTranslating: true,
+      sourceFocus: createSourceFocusState(),
+      chunkIssue: createChunkIssueState(),
+      resume: createResumeState({
+        mode: sessionMode,
+        chapterIndex: startFrom,
+        chunkIndex: chunkStartIndex,
+        rangeStart: startRange,
+        rangeEnd: endRange,
+        hasCheckpoint: true
+      }),
+      progress: {
+        current: startFrom,
+        total: totalWorkChapters,
+        percent: t.progress?.percent || 0
+      }
+    }));
+
+    isTranslatingRef.current = true;
+
+    let previousContext = '';
+    if (enableContextMemory && tabSnapshot.outputText) {
+      previousContext = tabSnapshot.outputText.slice(-contextMemorySize);
+    }
+
+    let handedOffToRetry = false;
+    let completed = false;
+
     try {
-      if (mode === 'single') {
-        updateActiveTab({ progress: { current: 1, total: 1, percent: 0 } });
-        const chapter = activeTab.chapters[chapterIndex];
+      for (let i = startFrom; i < endAt; i++) {
+        if (!isTranslatingRef.current) break;
 
-        const chapterHeader = `\n\n${'='.repeat(60)}\n${chapter.title} (${chapter.charCount} chars)\n${'='.repeat(60)}\n\n`;
+        const liveTab = getTabById(tabId);
+        if (!liveTab) break;
+
+        const chapter = liveTab.chapters[i];
+        if (!chapter) continue;
+
         const isLong = longOutputMode && chapter.charCount > longOutputThreshold;
+        const chunkSpans = splitTextIntoChunkSpans(chapter.content);
+        let startChunk = 0;
 
-        updateActiveTab({ tempTranslation: '' });
+        if (i === startFrom) {
+          if (chunkStartIndex > 0) {
+            startChunk = chunkStartIndex;
+          } else if (mode === 'next' && liveTab.resume?.hasCheckpoint && liveTab.resume.chapterIndex === i) {
+            startChunk = liveTab.resume.chunkIndex || 0;
+          }
+        }
 
+        startChunk = Math.max(0, Math.min(startChunk, chunkSpans.length));
         let translatedChars = 0;
-        const updateProgress = (chunk = '') => {
-          translatedChars += chunk.length;
-          const percent = Math.min(100, Math.round((translatedChars / chapter.charCount) * 100));
-          setTabs(prev => prev.map(t =>
-            t.id === activeTabId ? { ...t, progress: { ...t.progress, percent } } : t
-          ));
-        };
+        let chapterOutput = '';
 
-        let translation = '';
-        try {
-          const chunks = splitTextIntoChunks(chapter.content);
+        for (let j = startChunk; j < chunkSpans.length; j++) {
+          if (!isTranslatingRef.current) break;
 
-          for (const chunkContent of chunks) {
-            if (!isTranslatingRef.current) break;
+          const chunkContent = chunkSpans[j].content;
+          const preprocessMeta = preprocessTextForTranslation(chunkContent);
 
-            if (apiProvider === 'gemini' || apiProvider === 'huggingface') {
-              const chunkTranslation = await callAPI(chunkContent, null, false);
-              translation += chunkTranslation;
+          translationSessionRef.current.currentIndex = i;
+          translationSessionRef.current.currentChunkIndex = j;
 
-              // Simulate streaming for UX
-              await simulateStreaming(chunkTranslation, (chunk) => {
-                updateProgress(chunk);
-                setTabs(prev => prev.map(t => {
-                  if (t.id !== activeTabId) return t;
-                  if (!isLong) {
-                    return { ...t, streamingText: (t.streamingText || '') + chunk };
-                  } else {
-                    return { ...t, tempTranslation: (t.tempTranslation || '') + chunk };
-                  }
-                }));
-                if (!isLong) scrollToBottom();
-              }, abortControllerRef.current.signal);
-
-            } else {
-              // STREAMING LOGIC - MEMORY OPTIMIZED
-              // Capture the full text from callAPI even if streaming
-              const chunkTranslation = await callAPI(chunkContent, (chunk) => {
-                updateProgress(chunk);
-                setTabs(prev => prev.map(t => {
-                  if (t.id !== activeTabId) return t;
-                  if (!isLong) {
-                    return { ...t, streamingText: (t.streamingText || '') + chunk };
-                  } else {
-                    return { ...t, tempTranslation: (t.tempTranslation || '') + chunk };
-                  }
-                }));
-                if (!isLong) scrollToBottom();
-              }, true);
-
-              // Accumulate for integrity
-              if (chunkTranslation) {
-                translation += chunkTranslation;
-              }
-            }
-          }
-
-          // COMMIT PHASE - Move accumulated translation to main output
-          if (translation) {
-            setTabs(prev => prev.map(t => {
-              if (t.id !== activeTabId) return t;
-
-              if (!isLong) {
-                // Append to main output and CLEAR streaming buffer
-                return {
-                  ...t,
-                  outputText: (t.outputText || '') + translation + '\n\n',
-                  streamingText: ''
-                };
-              } else {
-                return { ...t, tempTranslation: translation, streamingText: '' };
-              }
-            }));
-
-            scrollToBottom();
-
-            if (isLong) {
-              // For long output mode, we still use tempTranslation
-              const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-              downloadTranslation(activeTab.tempTranslation, `chapter_${safeTitle}.txt`);
-            }
-            updateActiveTab({ tempTranslation: '' });
-            return;
-          }
-
-        } catch (streamErr) {
-          // If aborted, don't retry
-          if (streamErr.name === 'AbortError' || (streamErr.message && streamErr.message.includes('aborted'))) {
-            updateActiveTab({ isTranslating: false });
-            return; // STOP HERE
-          }
-          // Retry logic for chunks? Too complex for now, just fail or retry whole chapter
-          // For now, let's just log and maybe try non-streaming fallback for the whole chapter if possible, 
-          // but since we are chunking, fallback is hard.
-          console.error("Translation error:", streamErr);
-        }
-
-        if (translation) {
-          const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-          downloadTranslation(translation, `chapter_${safeTitle}.txt`);
-        }
-        updateActiveTab({ tempTranslation: '' });
-
-      } else if (mode === 'next') {
-        const nextIndex = activeTab.selectedChapter;
-        if (nextIndex >= activeTab.chapters.length) {
-          alert('No more chapters to translate');
-          return;
-        }
-
-        updateActiveTab({ progress: { current: 1, total: 1, percent: 0 } });
-        const chapter = activeTab.chapters[nextIndex];
-
-        const chapterHeader = `\n\n${'='.repeat(60)}\n${chapter.title} (${chapter.charCount} chars)\n${'='.repeat(60)}\n\n`;
-        const isLong = longOutputMode && chapter.charCount > longOutputThreshold;
-
-        updateActiveTab({ tempTranslation: '' });
-
-        let translatedChars = 0;
-        const updateProgress = (chunk = '') => {
-          translatedChars += chunk.length;
-          const percent = Math.min(100, Math.round((translatedChars / chapter.charCount) * 100));
-          setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, progress: { ...t.progress, percent } } : t));
-        };
-
-        let translation = '';
-        try {
-          const chunks = splitTextIntoChunks(chapter.content);
-
-          for (const chunkContent of chunks) {
-            if (!isTranslatingRef.current) break;
-
-            if (apiProvider === 'gemini' || apiProvider === 'huggingface') {
-              const chunkTranslation = await callAPI(chunkContent, null, false);
-              translation += chunkTranslation;
-
-              // Simulate streaming for UX
-              await simulateStreaming(chunkTranslation, (chunk) => {
-                updateProgress(chunk);
-                setTabs(prev => prev.map(t => {
-                  if (t.id !== activeTabId) return t;
-                  if (!isLong) {
-                    return { ...t, streamingText: (t.streamingText || '') + chunk };
-                  } else {
-                    return { ...t, tempTranslation: (t.tempTranslation || '') + chunk };
-                  }
-                }));
-                if (!isLong) scrollToBottom();
-              }, abortControllerRef.current.signal);
-
-            } else {
-              // STREAMING LOGIC - MEMORY OPTIMIZED
-              const chunkTranslation = await callAPI(chunkContent, (chunk) => {
-                updateProgress(chunk);
-                setTabs(prev => prev.map(t => {
-                  if (t.id !== activeTabId) return t;
-                  if (!isLong) {
-                    return { ...t, streamingText: (t.streamingText || '') + chunk };
-                  } else {
-                    return { ...t, tempTranslation: (t.tempTranslation || '') + chunk };
-                  }
-                }));
-                if (!isLong) scrollToBottom();
-              }, true);
-
-              if (chunkTranslation) {
-                translation += chunkTranslation;
-              }
-            }
-          }
-
-          // Clear streaming buffer after all chunks (for gemini/hf)
-          if (apiProvider === 'gemini' || apiProvider === 'huggingface') {
-            setTabs(prev => prev.map(t => {
-              if (t.id !== activeTabId) return t;
-              return { ...t, streamingText: '' };
-            }));
-          } else {
-            // COMMIT PHASE for next (real streaming)
-            commitBuffer();
-            setTabs(prev => prev.map(t => {
-              if (t.id !== activeTabId) return t;
-              let chunkText = t.streamingText || '';
-
-              // Process glossary
-              chunkText = processGlossary(chunkText);
-
-              if (!isLong) {
-                return {
-                  ...t,
-                  outputText: (t.outputText || '') + chunkText + '\n\n',
-                  streamingText: ''
-                };
-              } else {
-                return { ...t, tempTranslation: chunkText };
-              }
-            }));
-
-            // Post-stream logic for next
-            setTabs(prev => prev.map(t => {
-              if (t.id !== activeTabId) return t;
-              if (isLong && t.tempTranslation) {
-                const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-                downloadTranslation(t.tempTranslation, `chapter_${safeTitle}.txt`);
-              }
-              return { ...t, tempTranslation: '', selectedChapter: nextIndex + 1 };
-            }));
-            return;
-          }
-
-        } catch (streamErr) {
-          // If aborted, don't retry
-          if (streamErr.name === 'AbortError' || (streamErr.message && streamErr.message.includes('aborted'))) {
-            updateActiveTab({ isTranslating: false });
-            return; // STOP HERE
-          }
-          console.error("Translation error:", streamErr);
-        }
-
-        if (translation) {
-          // Process glossary
-          translation = processGlossary(translation);
-
-          updateProgress(translation);
-          setTabs(prev => prev.map(t => {
-            if (t.id !== activeTabId) return t;
-            if (!isLong) {
-              return { ...t, outputText: t.outputText + translation + '\n\n' };
-            } else {
-              return { ...t, tempTranslation: translation };
+          updateTab(tabId, (t) => ({
+            ...t,
+            resume: createResumeState({
+              mode: sessionMode,
+              chapterIndex: i,
+              chunkIndex: j,
+              rangeStart: startRange,
+              rangeEnd: endRange,
+              hasCheckpoint: true
+            }),
+            progress: {
+              ...t.progress,
+              current: i,
+              total: totalWorkChapters
             }
           }));
-          scrollToBottom();
+
+          const updateChunkProgress = (deltaText = '') => {
+            translatedChars += deltaText.length;
+            const chapterRatio = chapter.charCount > 0 ? Math.min(1, translatedChars / chapter.charCount) : 0;
+            const globalPercent = Math.min(100, Math.round(((i - startFrom + chapterRatio) / totalWorkChapters) * 100));
+
+            updateTab(tabId, (t) => ({
+              ...t,
+              progress: {
+                ...t.progress,
+                current: i,
+                total: totalWorkChapters,
+                percent: globalPercent
+              }
+            }));
+          };
+
+          const shouldStream = !['gemini', 'huggingface'].includes(apiProvider);
+          let chunkTranslation = '';
+
+          if (shouldStream) {
+            chunkTranslation = await callAPI(chunkContent, (chunkText) => {
+              updateChunkProgress(chunkText);
+              updateTab(tabId, (t) => ({
+                ...t,
+                streamingText: (t.streamingText || '') + chunkText
+              }));
+              scrollToBottom(tabId);
+            }, true, previousContext, preprocessMeta);
+          } else {
+            chunkTranslation = await callAPI(chunkContent, null, false, previousContext, preprocessMeta);
+            await simulateStreaming(chunkTranslation, (chunkText) => {
+              updateChunkProgress(chunkText);
+              updateTab(tabId, (t) => ({
+                ...t,
+                streamingText: (t.streamingText || '') + chunkText
+              }));
+              scrollToBottom(tabId);
+            }, abortControllerRef.current.signal);
+          }
+
+          chapterOutput += chunkTranslation;
+
+          updateTab(tabId, (t) => {
+            const nextOutput = isLong ? (t.outputText || '') : `${t.outputText || ''}${chunkTranslation}`;
+            const nextTemp = isLong ? `${t.tempTranslation || ''}${chunkTranslation}` : t.tempTranslation;
+
+            return {
+              ...t,
+              outputText: nextOutput,
+              tempTranslation: nextTemp,
+              streamingText: '',
+              resume: createResumeState({
+                mode: sessionMode,
+                chapterIndex: i,
+                chunkIndex: j + 1,
+                rangeStart: startRange,
+                rangeEnd: endRange,
+                hasCheckpoint: true
+              })
+            };
+          });
+
+          translationSessionRef.current.currentChunkIndex = j + 1;
+          scrollToBottom(tabId);
+        }
+
+        if (!isTranslatingRef.current) break;
+
+        if ((enableContextMemory || apiProvider === 'huggingface') && chapterOutput) {
+          const newNames = extractNamesFromTranslation(chapter.content, chapterOutput);
+          if (newNames.length > 0) {
+            setRollingGlossary((prev) => {
+              const updated = [...prev];
+              newNames.forEach((name) => {
+                if (!updated.some((item) => item.source === name.source)) {
+                  updated.push(name);
+                }
+              });
+              return updated.slice(-100);
+            });
+          }
+          previousContext = chapterOutput.slice(-contextMemorySize);
         }
 
         if (isLong) {
           const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-          downloadTranslation(translation, `chapter_${safeTitle}.txt`);
-        }
-        updateActiveTab({ tempTranslation: '', selectedChapter: nextIndex + 1 });
-
-      } else {
-        // Translate All OR Range
-        let startFrom = 0;
-        let endAt = activeTab.chapters.length;
-
-        if (mode === 'range') {
-          // Use arguments if provided, otherwise fallback to state
-          const start = argRangeStart > 0 ? argRangeStart : rangeStart;
-          const end = argRangeEnd > 0 ? argRangeEnd : rangeEnd;
-
-          // If chapterIndex is provided (from auto-continue), use it as startFrom
-          // Otherwise calculate from rangeStart
-          if (chapterIndex > 0) {
-            startFrom = chapterIndex; // Resume from this chapter
-          } else {
-            startFrom = Math.max(0, start - 1);
+          const tempText = getTabById(tabId)?.tempTranslation || chapterOutput;
+          if (tempText) {
+            downloadTranslation(tempText, `chapter_${safeTitle}.txt`);
           }
-          endAt = Math.min(activeTab.chapters.length, end);
         } else {
-          // 'all' mode, but check for continue
-          startFrom = chapterIndex || 0;
+          updateTab(tabId, (t) => ({
+            ...t,
+            outputText: `${t.outputText || ''}\n\n`
+          }));
         }
 
-        if (startFrom === 0 && mode !== 'range') {
-          updateActiveTab({ progress: { current: 0, total: activeTab.chapters.length, percent: 0 } });
-        } else if (mode === 'range') {
-          updateActiveTab({ progress: { current: 0, total: endAt - startFrom, percent: 0 } });
-        }
+        updateTab(tabId, (t) => ({
+          ...t,
+          tempTranslation: isLong ? '' : t.tempTranslation,
+          streamingText: '',
+          selectedChapter: Math.min(i + 1, Math.max(0, t.chapters.length - 1)),
+          progress: {
+            ...t.progress,
+            current: i + 1
+          },
+          resume: createResumeState({
+            mode: sessionMode,
+            chapterIndex: i + 1,
+            chunkIndex: 0,
+            rangeStart: startRange,
+            rangeEnd: endRange,
+            hasCheckpoint: i + 1 < endAt
+          })
+        }));
 
-        let previousContext = '';
+        translationSessionRef.current.currentIndex = i + 1;
+        translationSessionRef.current.currentChunkIndex = 0;
+        consecutiveErrorsRef.current = 0;
+        lastErrorRef.current = '';
+      }
 
-        for (let i = startFrom; i < endAt; i++) {
-          if (!isTranslatingRef.current) break; // Check stop flag
-
-          // Track current position for auto-continue
-          translationSessionRef.current.currentIndex = i;
-
-          const chapter = activeTab.chapters[i];
-          // Update progress current chapter
-          // setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, progress: { ...t.progress, current: i + 1, total: t.chapters.length, percent: 0 } } : t));
-
-          const chapterHeader = `\n\n${'='.repeat(60)}\n${chapter.title} (${chapter.charCount} chars)\n${'='.repeat(60)}\n\n`;
-          const isLong = longOutputMode && chapter.charCount > longOutputThreshold;
-
-          updateActiveTab({ tempTranslation: '' });
-
-          let translatedChars = 0;
-          const updateProgress = (chunk = '') => {
-            translatedChars += chunk.length;
-            // Calculate global percent: (completed chapters + current chapter progress) / total chapters
-            const currentChapterPercent = Math.min(100, (translatedChars / chapter.charCount));
-            const globalPercent = Math.min(100, Math.round(((i + currentChapterPercent) / activeTab.chapters.length) * 100));
-
-            setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, progress: { ...t.progress, current: i + 1, percent: globalPercent } } : t));
-          };
-
-          try {
-            const chunks = splitTextIntoChunks(chapter.content);
-
-            for (const chunkContent of chunks) {
-              if (!isTranslatingRef.current) break;
-
-              if (apiProvider === 'gemini' || apiProvider === 'huggingface') {
-                const chunkTranslation = await callAPI(chunkContent, null, false, previousContext);
-                // Simulate streaming for UX
-                await simulateStreaming(chunkTranslation, (chunk) => {
-                  updateProgress(chunk);
-                  setTabs(prev => prev.map(t => {
-                    if (t.id !== activeTabId) return t;
-                    if (!isLong) {
-                      return { ...t, streamingText: (t.streamingText || '') + chunk };
-                    } else {
-                      return { ...t, tempTranslation: (t.tempTranslation || '') + chunk };
-                    }
-                  }));
-                  if (!isLong) scrollToBottom();
-                }, abortControllerRef.current.signal);
-
-                // Add to output
-                setTabs(prev => prev.map(t => {
-                  if (t.id !== activeTabId) return t;
-                  if (!isLong) {
-                    return { ...t, outputText: (t.outputText || '') + t.streamingText + '\n\n', streamingText: '' };
-                  } else {
-                    return { ...t, tempTranslation: t.tempTranslation };
-                  }
-                }));
-              } else {
-                // Streaming providers (OpenAI, Grok, Anthropic, DeepSeek)
-                await callAPI(chunkContent, (chunk) => {
-                  updateProgress(chunk);
-                  setTabs(prev => prev.map(t => {
-                    if (t.id !== activeTabId) return t;
-                    if (!isLong) {
-                      return { ...t, streamingText: (t.streamingText || '') + chunk };
-                    } else {
-                      return { ...t, tempTranslation: (t.tempTranslation || '') + chunk };
-                    }
-                  }));
-                  if (!isLong) scrollToBottom();
-                }, true, previousContext);
-
-                commitBuffer();
-                // Add to output
-                setTabs(prev => prev.map(t => {
-                  if (t.id !== activeTabId) return t;
-                  if (!isLong) {
-                    return { ...t, outputText: (t.outputText || '') + t.streamingText + '\n\n', streamingText: '' };
-                  } else {
-                    return { ...t, tempTranslation: t.tempTranslation };
-                  }
-                }));
-              }
-            }
-
-            // Extract names and update rolling glossary (token-efficient context)
-            if (enableContextMemory) {
-              const fullChapterText = isLong ? activeTab.tempTranslation : (activeTab.outputText || '');
-              const newNames = extractNamesFromTranslation(chapter.content, fullChapterText);
-              if (newNames.length > 0) {
-                setRollingGlossary(prev => {
-                  const updated = [...prev];
-                  newNames.forEach(name => {
-                    if (!updated.some(n => n.source === name.source)) {
-                      updated.push(name);
-                    }
-                  });
-                  // Keep only last 100 terms to prevent bloat
-                  return updated.slice(-100);
-                });
-              }
-              // Keep configured context usage
-              previousContext = fullChapterText.slice(-contextMemorySize);
-            }
-
-          } catch (err) {
-            if (err.name === 'AbortError' || (err.message && err.message.includes('aborted'))) {
-              updateActiveTab({ isTranslating: false });
-              consecutiveErrorsRef.current = 0;
-              lastErrorRef.current = '';
-              return;
-            }
-            throw err; // Re-throw to be caught by outer catch
+      completed = isTranslatingRef.current && translationSessionRef.current.currentIndex >= endAt;
+      if (completed) {
+        updateTab(tabId, (t) => ({
+          ...t,
+          sourceFocus: createSourceFocusState(),
+          chunkIssue: createChunkIssueState(),
+          resume: createResumeState(),
+          progress: {
+            ...t.progress,
+            current: endAt,
+            total: totalWorkChapters,
+            percent: 100
           }
-
-          // Reset error counter on successful chunk
-          consecutiveErrorsRef.current = 0;
-          lastErrorRef.current = '';
-
-          if (isLong) {
-            const safeTitle = chapter.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-            downloadTranslation(activeTab.tempTranslation, `chapter_${safeTitle}.txt`);
-          }
-
-          // Update progress to next chapter
-          updateActiveTab({ tempTranslation: '', streamingText: '', progress: { ...activeTab.progress, current: i + 1 } });
-        }
+        }));
       }
     } catch (error) {
-      // Don't show error if user aborted
-      if (error.name !== 'AbortError' && !error.message.includes('aborted')) {
+      if (error.name !== 'AbortError' && !(error.message || '').includes('aborted')) {
         const errorMsg = error.message || 'Unknown error';
+        const normalizedError = errorMsg.toLowerCase();
 
-        // Check if this is a non-retryable error
         const nonRetryableErrors = [
-          'API key',
-          'Invalid API',
+          'api key',
+          'invalid api',
           'authentication',
           'unauthorized',
           'forbidden',
@@ -1815,84 +2017,121 @@ export default function TranslationTool() {
           'quota exceeded',
           'rate limit'
         ];
-        const isNonRetryable = nonRetryableErrors.some(e =>
-          errorMsg.toLowerCase().includes(e.toLowerCase())
-        );
+        const isNonRetryable = nonRetryableErrors.some((term) => normalizedError.includes(term));
+        const looksLikePolicy403 = normalizedError.includes('403') && ![
+          'api key',
+          'invalid api',
+          'authentication',
+          'unauthorized',
+          'forbidden'
+        ].some((term) => normalizedError.includes(term));
+        const isModerationBlock = isModerationBlockError(errorMsg) || looksLikePolicy403;
 
-        // Track consecutive errors
         if (lastErrorRef.current === errorMsg) {
-          consecutiveErrorsRef.current++;
+          consecutiveErrorsRef.current += 1;
         } else {
           consecutiveErrorsRef.current = 1;
           lastErrorRef.current = errorMsg;
         }
 
-        // Display error
-        setTabs(prev => prev.map(t => t.id === activeTabId ? {
-          ...t,
-          outputText: t.outputText + `\n\n⚠️ Error: ${errorMsg}${autoContinueOnError ? ' (Auto-retrying...)' : ''}`
-        } : t));
-        scrollToBottom();
+        const canAutoRetry = autoContinueOnError && !isNonRetryable && consecutiveErrorsRef.current < MAX_CONSECUTIVE_ERRORS;
 
-        // Auto-continue logic
-        if (autoContinueOnError && !isNonRetryable && consecutiveErrorsRef.current < MAX_CONSECUTIVE_ERRORS) {
-          // Wait a bit before retrying (exponential backoff)
+        updateTab(tabId, (t) => ({
+          ...t,
+          outputText: `${t.outputText || ''}\n\nError: ${errorMsg}${canAutoRetry ? ' (Auto-retrying...)' : ''}`
+        }));
+        scrollToBottom(tabId);
+
+        if (canAutoRetry) {
           const retryDelay = Math.min(5000, 1000 * Math.pow(2, consecutiveErrorsRef.current - 1));
 
-          setTabs(prev => prev.map(t => t.id === activeTabId ? {
+          updateTab(tabId, (t) => ({
             ...t,
-            outputText: t.outputText + `\nRetrying in ${retryDelay / 1000}s... (Attempt ${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_ERRORS})`
-          } : t));
-          scrollToBottom();
+            outputText: `${t.outputText || ''}\nRetrying in ${retryDelay / 1000}s... (Attempt ${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_ERRORS})`
+          }));
 
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
 
-          // Check if still should continue (user might have stopped)
           if (autoContinueOnError) {
-            // Resume from where we stopped using session ref
             const session = translationSessionRef.current;
-            const resumeIndex = session.currentIndex;
-
-            if (session.mode === 'range') {
-              const rangeEndIdx = Math.min(activeTab.chapters.length, session.rangeEnd);
-              if (resumeIndex < rangeEndIdx) {
-                isTranslatingRef.current = true;
-                updateActiveTab({ isTranslating: true });
-                translateText('range', resumeIndex, session.rangeStart, session.rangeEnd);
-                return;
-              }
-            } else {
-              // 'all' mode
-              if (resumeIndex < activeTab.chapters.length) {
-                isTranslatingRef.current = true;
-                updateActiveTab({ isTranslating: true });
-                translateText('all', resumeIndex);
-                return;
-              }
+            if (session.tabId === tabId) {
+              handedOffToRetry = true;
+              isTranslatingRef.current = true;
+              updateTab(tabId, { isTranslating: true });
+              translateText(
+                session.mode,
+                session.currentIndex,
+                session.rangeStart,
+                session.rangeEnd,
+                session.currentChunkIndex,
+                session.tabId
+              );
+              return;
             }
           }
         } else if (isNonRetryable) {
-          setTabs(prev => prev.map(t => t.id === activeTabId ? {
+          const session = translationSessionRef.current;
+          const retryResume = createResumeState({
+            mode: session.mode || sessionMode,
+            chapterIndex: Math.max(0, session.currentIndex || 0),
+            chunkIndex: Math.max(0, session.currentChunkIndex || 0),
+            rangeStart: session.rangeStart || startRange,
+            rangeEnd: session.rangeEnd || endRange,
+            hasCheckpoint: true
+          });
+
+          translationSessionRef.current.currentIndex = retryResume.chapterIndex;
+          translationSessionRef.current.currentChunkIndex = retryResume.chunkIndex;
+          const issueMessage = isModerationBlock
+            ? 'Provider safety policy blocked this chunk. Retry this chunk or skip to the next chunk.'
+            : 'This chunk failed and needs manual action. Retry this chunk or skip to the next chunk.';
+
+          updateTab(tabId, (t) => ({
             ...t,
-            outputText: t.outputText + `\n❌ Cannot auto-continue: This error requires manual intervention.`
-          } : t));
+            outputText: `${t.outputText || ''}\n${issueMessage}`,
+            resume: retryResume,
+            progress: {
+              ...t.progress,
+              current: retryResume.chapterIndex
+            }
+          }));
+          applyChunkFocus(tabId, retryResume, issueMessage, isModerationBlock);
+
           consecutiveErrorsRef.current = 0;
           lastErrorRef.current = '';
         } else if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_ERRORS) {
-          setTabs(prev => prev.map(t => t.id === activeTabId ? {
+          const session = translationSessionRef.current;
+          const retryResume = createResumeState({
+            mode: session.mode || sessionMode,
+            chapterIndex: Math.max(0, session.currentIndex || 0),
+            chunkIndex: Math.max(0, session.currentChunkIndex || 0),
+            rangeStart: session.rangeStart || startRange,
+            rangeEnd: session.rangeEnd || endRange,
+            hasCheckpoint: true
+          });
+          const pauseMessage = `Auto-continue paused after ${MAX_CONSECUTIVE_ERRORS} failed retries. Retry this chunk or skip to the next chunk.`;
+
+          updateTab(tabId, (t) => ({
             ...t,
-            outputText: t.outputText + `\n❌ Auto-continue stopped: Same error occurred ${MAX_CONSECUTIVE_ERRORS} times consecutively.`
-          } : t));
+            outputText: `${t.outputText || ''}\n${pauseMessage}`,
+            resume: retryResume
+          }));
+          applyChunkFocus(tabId, retryResume, pauseMessage);
           consecutiveErrorsRef.current = 0;
           lastErrorRef.current = '';
         }
       }
     } finally {
-      updateActiveTab({ isTranslating: false }); // Don't reset progress here to allow resume
-      scrollToBottom();
+      if (!handedOffToRetry) {
+        updateTab(tabId, (t) => ({
+          ...t,
+          isTranslating: false,
+          streamingText: ''
+        }));
+      }
+      scrollToBottom(tabId);
     }
   };
-
   const downloadTranslation = (text = activeTab.outputText, filename = null) => {
     // Generate filename from uploaded file if available
     let finalFilename = filename;
@@ -1915,70 +2154,104 @@ export default function TranslationTool() {
 
   const clearTranslation = () => {
     if (window.confirm('Are you sure you want to clear the translation output?')) {
-      updateActiveTab({ outputText: '', tempTranslation: '', streamingText: '', progress: { current: 0, total: 0, percent: 0 } });
+      updateActiveTab({
+        outputText: '',
+        tempTranslation: '',
+        streamingText: '',
+        progress: { current: 0, total: 0, percent: 0 },
+        resume: createResumeState(),
+        sourceFocus: createSourceFocusState(),
+        chunkIssue: createChunkIssueState()
+      });
     }
   };
 
+  const activeResume = activeTab.resume || createResumeState();
+  const hasResumePoint = !!activeResume.hasCheckpoint && !activeTab.isTranslating;
+  const canSkipChunk = hasResumePoint;
+  const continueChapterLabel = activeResume.chapterIndex + 1;
+  const chunkIssueMessage = activeTab.chunkIssue?.hasIssue ? activeTab.chunkIssue.message : '';
+
+  const handleContinue = () => {
+    if (activeResume.hasCheckpoint) {
+      applyChunkFocus(activeTabId, activeResume, chunkIssueMessage, !!activeTab.chunkIssue?.isRestricted);
+      translateText(
+        activeResume.mode || 'all',
+        activeResume.chapterIndex || 0,
+        activeResume.rangeStart || rangeStart,
+        activeResume.rangeEnd || rangeEnd,
+        activeResume.chunkIndex || 0,
+        activeTabId
+      );
+      return;
+    }
+
+    translateText('all', activeTab.progress.current || 0, rangeStart, rangeEnd, 0, activeTabId);
+  };
+
+  const handleSkipChunk = () => {
+    if (!activeResume.hasCheckpoint) return;
+
+    const nextResume = buildNextChunkResume(activeTab, activeResume);
+    if (!nextResume.hasCheckpoint) {
+      updateActiveTab({
+        resume: createResumeState(),
+        sourceFocus: createSourceFocusState(),
+        chunkIssue: createChunkIssueState(),
+        outputText: `${activeTab.outputText || ''}\nReached the end of the current translation scope after skipping the chunk.`
+      });
+      return;
+    }
+
+    updateActiveTab({
+      resume: nextResume,
+      chunkIssue: createChunkIssueState()
+    });
+
+    applyChunkFocus(activeTabId, nextResume, 'Skipped to the next chunk. Review this chunk, then continue.');
+    translateText(
+      nextResume.mode || 'all',
+      nextResume.chapterIndex,
+      nextResume.rangeStart,
+      nextResume.rangeEnd,
+      nextResume.chunkIndex,
+      activeTabId
+    );
+  };
+
   return (
-    <div className="flex h-screen w-screen bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-sans overflow-hidden transition-colors duration-200">
-      <Sidebar
-        apiProvider={apiProvider}
-        setApiProvider={setApiProvider}
-        setModel={setModel}
-        model={model}
-        apiKey={apiKey}
-        setApiKey={setApiKey}
-        language={language}
-        setLanguage={setLanguage}
-        chapterDetection={chapterDetection}
-        setChapterDetection={setChapterDetection}
-        charsPerChapter={charsPerChapter}
-        setCharsPerChapter={setCharsPerChapter}
-        customPrompt={customPrompt}
-        setCustomPrompt={setCustomPrompt}
-        excelPrompt={excelPrompt}
-        setExcelPrompt={setExcelPrompt}
-        translationMode={translationMode}
-        glossary={glossary}
-        setGlossary={setGlossary}
-        enableContextMemory={enableContextMemory}
-        setEnableContextMemory={setEnableContextMemory}
-        contextMemorySize={contextMemorySize}
-        setContextMemorySize={setContextMemorySize}
-        autoGlossary={autoGlossary}
-        setAutoGlossary={setAutoGlossary}
-        user={user}
-      // onLoginClick={() => setIsAuthModalOpen(true)}
-      // onLogoutClick={handleLogout}
-      />
+    <div className="relative flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(37,99,235,0.08),transparent_58%)] dark:bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.16),transparent_62%)]" />
 
-      <main className="flex-1 flex flex-col h-full overflow-hidden">
-        {/* Mode Switcher + Header */}
-        <div className="flex items-center justify-between px-4 py-2 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700">
-          {/* Mode Toggle */}
-          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-700 rounded-lg">
-            <button
-              onClick={() => setTranslationMode('text')}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${translationMode === 'text'
-                ? 'bg-white dark:bg-slate-600 text-indigo-600 dark:text-indigo-400 shadow-sm'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-            >
-              📝 Text
-            </button>
-            <button
-              onClick={() => setTranslationMode('excel')}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${translationMode === 'excel'
-                ? 'bg-white dark:bg-slate-600 text-emerald-600 dark:text-emerald-400 shadow-sm'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-            >
-              📊 Excel
-            </button>
-          </div>
+      <div className="relative z-10 m-3 flex flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_24px_80px_-36px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-950 max-md:m-0 max-md:rounded-none">
+        <Sidebar
+          apiProvider={apiProvider}
+          setApiProvider={setApiProvider}
+          setModel={setModel}
+          model={model}
+          apiKey={apiKey}
+          setApiKey={setApiKey}
+          language={language}
+          setLanguage={setLanguage}
+          chapterDetection={chapterDetection}
+          setChapterDetection={setChapterDetection}
+          charsPerChapter={charsPerChapter}
+          setCharsPerChapter={setCharsPerChapter}
+          customPrompt={customPrompt}
+          setCustomPrompt={setCustomPrompt}
+          glossary={glossary}
+          setGlossary={setGlossary}
+          enableContextMemory={enableContextMemory}
+          setEnableContextMemory={setEnableContextMemory}
+          contextMemorySize={contextMemorySize}
+          setContextMemorySize={setContextMemorySize}
+          autoGlossary={autoGlossary}
+          setAutoGlossary={setAutoGlossary}
+          user={user}
+        />
 
-          {/* Original Header content for text mode */}
-          {translationMode === 'text' && (
+        <main className="relative flex h-full flex-1 flex-col overflow-hidden max-md:min-h-0">
+          <div className="border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-950">
             <Header
               fileInputRef={fileInputRef}
               handleFileUpload={handleFileUpload}
@@ -1990,79 +2263,61 @@ export default function TranslationTool() {
               toggleDarkMode={toggleDarkMode}
               isInline={true}
             />
-          )}
+          </div>
 
-          {/* Dark mode toggle for Excel mode */}
-          {translationMode === 'excel' && (
-            <button
-              onClick={toggleDarkMode}
-              className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-              title={isDarkMode ? 'Light mode' : 'Dark mode'}
-            >
-              {isDarkMode ? '☀️' : '🌙'}
-            </button>
-          )}
-        </div>
+        <TranslationPanel
+          tabs={tabs}
+          activeTabId={activeTabId}
+          setActiveTabId={setActiveTabId}
+            addTab={addTab}
+            closeTab={closeTab}
+            inputText={activeTab.inputText}
+            setInputText={(text) => updateActiveTab({ inputText: text })}
+            setWordCount={(count) => updateActiveTab({ wordCount: count })}
+            analyzeText={analyzeText}
+            wordCount={activeTab.wordCount}
+            isTranslating={activeTab.isTranslating}
+            outputRef={outputRef}
+            outputText={activeTab.outputText}
+            streamingText={activeTab.streamingText}
+          clearTranslation={clearTranslation}
+          selectedChapter={activeTab.selectedChapter}
+          chapters={activeTab.chapters}
+          sourceFocus={activeTab.sourceFocus}
+        />
 
-        {/* Conditional Content based on mode */}
-        {translationMode === 'text' ? (
-          <>
-            <TranslationPanel
-              tabs={tabs}
-              activeTabId={activeTabId}
-              setActiveTabId={setActiveTabId}
-              addTab={addTab}
-              closeTab={closeTab}
-              inputText={activeTab.inputText}
-              setInputText={(text) => updateActiveTab({ inputText: text })}
-              setWordCount={(count) => updateActiveTab({ wordCount: count })}
-              analyzeText={analyzeText}
-              wordCount={activeTab.wordCount}
-              isTranslating={activeTab.isTranslating}
-              outputRef={outputRef}
-              outputText={activeTab.outputText}
-              streamingText={activeTab.streamingText}
-              clearTranslation={clearTranslation}
-              selectedChapter={activeTab.selectedChapter}
-              chapters={activeTab.chapters}
-            />
-
-            <Footer
-              chapters={activeTab.chapters}
-              selectedChapter={activeTab.selectedChapter}
-              setSelectedChapter={(idx) => updateActiveTab({ selectedChapter: idx })}
-              isTranslating={activeTab.isTranslating}
-              translateText={translateText}
-              stopTranslation={stopTranslation}
-              progress={activeTab.progress}
-              onContinue={() => translateText('all', activeTab.progress.current)}
-              rangeStart={rangeStart}
-              setRangeStart={setRangeStart}
-              rangeEnd={rangeEnd}
-              setRangeEnd={setRangeEnd}
-              autoContinueOnError={autoContinueOnError}
-              setAutoContinueOnError={setAutoContinueOnError}
-            />
-          </>
-        ) : (
-          <ExcelTranslationPanel
-            customPrompt={excelPrompt}
-            model={model}
-            apiKey={apiKey}
-            onBack={() => setTranslationMode('text')}
+        <Footer
+          chapters={activeTab.chapters}
+          selectedChapter={activeTab.selectedChapter}
+          setSelectedChapter={(idx) => updateActiveTab({
+            selectedChapter: idx,
+            sourceFocus: createSourceFocusState()
+          })}
+          isTranslating={activeTab.isTranslating}
+          translateText={translateText}
+          stopTranslation={stopTranslation}
+          progress={activeTab.progress}
+          onContinue={handleContinue}
+          canContinue={hasResumePoint}
+          onSkipChunk={handleSkipChunk}
+          canSkipChunk={canSkipChunk}
+          continueChapterLabel={continueChapterLabel}
+          chunkIssueMessage={chunkIssueMessage}
+          rangeStart={rangeStart}
+          setRangeStart={setRangeStart}
+            rangeEnd={rangeEnd}
+            setRangeEnd={setRangeEnd}
+            autoContinueOnError={autoContinueOnError}
+            setAutoContinueOnError={setAutoContinueOnError}
           />
-        )}
-      </main>
-
-      {/* AuthModal temporarily disabled */}
-      {/* <AuthModal
-        isOpen={isAuthModalOpen}
-        onClose={() => setIsAuthModalOpen(false)}
-        onLoginSuccess={(user) => {
-            setUser(user);
-            fetchUserSettings(user.id);
-        }}
-      /> */}
+        </main>
+      </div>
     </div>
   );
 }
+
+
+
+
+
+

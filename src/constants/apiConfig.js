@@ -69,6 +69,17 @@ export const apiProviders = {
         supportsCache: true,
         supportsTools: true
     },
+    huggingface: {
+        name: 'Hugging Face',
+        models: [
+            'space:doof-ferb/hirashiba-mt-zh-vi',
+            'facebook/nllb-200-distilled-600M'
+        ],
+        defaultModel: 'space:doof-ferb/hirashiba-mt-zh-vi',
+        endpoint: 'https://api-inference.huggingface.co/models/',
+        requiresKey: true,
+        useBackend: false  // Direct browser call
+    },
     groq: {
         name: 'Groq',
         models: [
