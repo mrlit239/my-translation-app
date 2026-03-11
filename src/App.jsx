@@ -18,6 +18,16 @@ export default function TranslationTool() {
     ...overrides
   });
 
+  const createTranslationSessionState = (overrides = {}) => ({
+    tabId: '',
+    mode: 'all',
+    currentIndex: 0,
+    currentChunkIndex: 0,
+    rangeStart: 1,
+    rangeEnd: 1,
+    ...overrides
+  });
+
   const createSourceFocusState = (overrides = {}) => ({
     active: false,
     start: 0,
@@ -183,25 +193,22 @@ export default function TranslationTool() {
 
   // Auto-continue on error settings
   const [autoContinueOnError, setAutoContinueOnError] = useState(true);
-  const consecutiveErrorsRef = useRef(0);
-  const lastErrorRef = useRef('');
+  const [autoPolishOutput, setAutoPolishOutput] = useState(false);
+  const tabErrorStateRef = useRef({});
   const MAX_CONSECUTIVE_ERRORS = 3;
 
-  // Track current translation session for auto-continue
-  const translationSessionRef = useRef({
-    tabId: 'tab-1',
-    mode: 'all',
-    currentIndex: 0,
-    currentChunkIndex: 0,
-    rangeStart: 1,
-    rangeEnd: 1
-  });
+  // Track active translation session per tab
+  const translationSessionsRef = useRef({});
+  const activeAbortControllersRef = useRef({});
+  const translatingTabsRef = useRef({});
 
-  // Rolling glossary for name consistency (token-efficient alternative to text overlap)
-  const [rollingGlossary, setRollingGlossary] = useState([]);
+  // Rolling glossary for name consistency, scoped per tab
+  const [rollingGlossaryByTab, setRollingGlossaryByTab] = useState({});
+  const nameAlignmentVotesRef = useRef({});
+  const hfSpaceNameCacheRef = useRef({});
 
   // Visibility state for background tab handling
-  const pendingUpdatesRef = useRef([]);
+  const pendingUpdatesRef = useRef({});
   const tabsRef = useRef(tabs);
   const activeTabIdRef = useRef(activeTabId);
   // Provider-specific defaults
@@ -213,8 +220,8 @@ export default function TranslationTool() {
       if (!enableContextMemory) {
         setEnableContextMemory(true);
       }
-      if (contextMemorySize < 1000) {
-        setContextMemorySize(1000);
+      if (contextMemorySize < 320) {
+        setContextMemorySize(320);
       }
       setAutoGlossary(false);
     }
@@ -257,10 +264,13 @@ export default function TranslationTool() {
     const handleVisibilityChange = () => {
       const visible = document.visibilityState === 'visible';
 
-      if (visible && pendingUpdatesRef.current.length > 0) {
-        // Flush pending updates when tab becomes visible
-        pendingUpdatesRef.current.forEach(update => update());
-        pendingUpdatesRef.current = [];
+      if (visible) {
+        const pendingByTab = pendingUpdatesRef.current;
+        Object.keys(pendingByTab).forEach((tabId) => {
+          const queue = pendingByTab[tabId] || [];
+          queue.forEach((update) => update());
+          pendingByTab[tabId] = [];
+        });
       }
     };
 
@@ -278,8 +288,6 @@ export default function TranslationTool() {
 
   const fileInputRef = useRef(null);
   const outputRef = useRef(null);
-  const abortControllerRef = useRef(null);
-  const isTranslatingRef = useRef(false);
   const hfSpaceClientRef = useRef({ spaceId: '', token: '', client: null });
   // Helper to get active tab
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
@@ -300,6 +308,353 @@ export default function TranslationTool() {
       }
       return { ...tab, ...updatesOrUpdater };
     }));
+  };
+
+  const getSessionForTab = (tabId) => {
+    if (!tabId) return createTranslationSessionState();
+    return translationSessionsRef.current[tabId] || createTranslationSessionState({ tabId });
+  };
+
+  const setSessionForTab = (tabId, sessionOrUpdater) => {
+    if (!tabId) return createTranslationSessionState();
+    const current = getSessionForTab(tabId);
+    const next = typeof sessionOrUpdater === 'function'
+      ? sessionOrUpdater(current)
+      : { ...current, ...sessionOrUpdater };
+    translationSessionsRef.current[tabId] = { ...next, tabId };
+    return translationSessionsRef.current[tabId];
+  };
+
+  const clearSessionForTab = (tabId) => {
+    if (!tabId) return;
+    delete translationSessionsRef.current[tabId];
+  };
+
+  const isTabTranslatingRuntime = (tabId) => !!translatingTabsRef.current[tabId];
+
+  const setTabTranslatingRuntime = (tabId, value) => {
+    if (!tabId) return;
+    if (value) {
+      translatingTabsRef.current[tabId] = true;
+      return;
+    }
+    delete translatingTabsRef.current[tabId];
+  };
+
+  const getTabErrorState = (tabId) => tabErrorStateRef.current[tabId] || { consecutive: 0, last: '' };
+
+  const setTabErrorState = (tabId, nextState) => {
+    if (!tabId) return getTabErrorState(tabId);
+    tabErrorStateRef.current[tabId] = nextState;
+    return tabErrorStateRef.current[tabId];
+  };
+
+  const resetTabErrorState = (tabId) => {
+    if (!tabId) return;
+    delete tabErrorStateRef.current[tabId];
+  };
+
+  const setAbortControllerForTab = (tabId, controller) => {
+    if (!tabId) return;
+    if (!controller) {
+      delete activeAbortControllersRef.current[tabId];
+      return;
+    }
+    activeAbortControllersRef.current[tabId] = controller;
+  };
+
+  const getAbortControllerForTab = (tabId) => activeAbortControllersRef.current[tabId] || null;
+
+  const clearAbortControllerForTab = (tabId) => {
+    if (!tabId) return;
+    delete activeAbortControllersRef.current[tabId];
+  };
+
+  const queuePendingUpdate = (tabId, updateFn) => {
+    if (!tabId) return;
+    if (!pendingUpdatesRef.current[tabId]) {
+      pendingUpdatesRef.current[tabId] = [];
+    }
+    pendingUpdatesRef.current[tabId].push(updateFn);
+  };
+
+  const flushPendingUpdatesForTab = (tabId) => {
+    if (!tabId) return;
+    const queue = pendingUpdatesRef.current[tabId] || [];
+    queue.forEach((update) => update());
+    pendingUpdatesRef.current[tabId] = [];
+  };
+
+  const getRollingGlossaryForTab = useCallback((tabId) => rollingGlossaryByTab[tabId] || [], [rollingGlossaryByTab]);
+
+  const setRollingGlossaryForTab = (tabId, updaterOrValue) => {
+    if (!tabId) return;
+    setRollingGlossaryByTab((prev) => {
+      const current = prev[tabId] || [];
+      const next = typeof updaterOrValue === 'function'
+        ? updaterOrValue(current)
+        : updaterOrValue;
+
+      if (!Array.isArray(next) || next.length === 0) {
+        const { [tabId]: _removed, ...rest } = prev;
+        return rest;
+      }
+
+      return {
+        ...prev,
+        [tabId]: next
+      };
+    });
+  };
+
+  const getNameAlignmentVotesForTab = (tabId) => nameAlignmentVotesRef.current[tabId] || {};
+
+  const clearNameAlignmentVotesForTab = (tabId) => {
+    if (!tabId) return;
+    delete nameAlignmentVotesRef.current[tabId];
+  };
+
+  const getHfSpaceNameCacheForTab = (tabId) => hfSpaceNameCacheRef.current[tabId] || {};
+
+  const clearHfSpaceNameCacheForTab = (tabId) => {
+    if (!tabId) return;
+    delete hfSpaceNameCacheRef.current[tabId];
+  };
+
+  const updateHfSpaceNameCacheForTab = (tabId, entries = {}) => {
+    if (!tabId || !entries || typeof entries !== 'object') return;
+    hfSpaceNameCacheRef.current[tabId] = {
+      ...getHfSpaceNameCacheForTab(tabId),
+      ...entries
+    };
+  };
+
+  const recordNameAlignmentVotesForTab = (tabId, sourceText = '', translatedText = '') => {
+    if (!tabId || !sourceText || !translatedText || !/[\u4e00-\u9fff]/.test(sourceText)) {
+      return getNameAlignmentVotesForTab(tabId);
+    }
+
+    const sourceBlocks = sourceText
+      .split(/\n+/)
+      .map((block) => block.trim())
+      .filter(Boolean);
+    const targetBlocks = translatedText
+      .split(/\n+/)
+      .map((block) => block.trim())
+      .filter(Boolean);
+
+    if (sourceBlocks.length === 0 || targetBlocks.length === 0) {
+      return getNameAlignmentVotesForTab(tabId);
+    }
+
+    const targetNamePattern = /\b\p{Lu}[\p{L}\p{M}'-]*(?:\s+[\p{L}\p{M}'-]+){0,3}\b/gu;
+    const stopWords = new Set([
+      'The', 'This', 'That', 'These', 'Those', 'With', 'From', 'When', 'Then', 'After', 'Before',
+      'And', 'But', 'Or', 'Yet', 'Because', 'While', 'However', 'Meanwhile', 'Chapter', 'Section',
+      'Chung ta', 'Chúng ta', 'Ta', 'Ngươi', 'Không', 'Đừng', 'Lão sư', 'Sư phụ', 'Tiên sinh'
+    ]);
+
+    const currentVotes = getNameAlignmentVotesForTab(tabId);
+    const nextVotes = Object.fromEntries(
+      Object.entries(currentVotes).map(([source, targets]) => [source, { ...targets }])
+    );
+    const blockCount = Math.min(sourceBlocks.length, targetBlocks.length);
+
+    for (let index = 0; index < blockCount; index += 1) {
+      const sourceNames = [...new Set(sourceBlocks[index].match(/[\u4e00-\u9fff]{2,4}/g) || [])];
+      const targetNames = [...new Set(targetBlocks[index].match(targetNamePattern) || [])]
+        .map((name) => name.trim())
+        .filter((name) => (
+          name &&
+          !stopWords.has(name) &&
+          !/[,:;!?."“”‘’]/.test(name) &&
+          !/\d/.test(name)
+        ));
+
+      if (
+        sourceNames.length === 0 ||
+        targetNames.length === 0 ||
+        sourceNames.length !== targetNames.length ||
+        sourceNames.length > 3
+      ) {
+        continue;
+      }
+
+      sourceNames.forEach((sourceName, pairIndex) => {
+        const targetName = targetNames[pairIndex];
+        if (!targetName) return;
+
+        if (!nextVotes[sourceName]) {
+          nextVotes[sourceName] = {};
+        }
+
+        nextVotes[sourceName][targetName] = (nextVotes[sourceName][targetName] || 0) + 1;
+      });
+    }
+
+    nameAlignmentVotesRef.current[tabId] = nextVotes;
+    return nextVotes;
+  };
+
+  const extractStableNamePairs = (tabId, existingTerms = []) => {
+    const existingSources = new Set(
+      existingTerms
+        .map((term) => (term?.source || '').trim())
+        .filter(Boolean)
+    );
+
+    return Object.entries(getNameAlignmentVotesForTab(tabId)).reduce((acc, [source, targets]) => {
+      if (existingSources.has(source)) return acc;
+
+      const rankedTargets = Object.entries(targets || {}).sort((left, right) => {
+        if ((right[1] || 0) !== (left[1] || 0)) return (right[1] || 0) - (left[1] || 0);
+        return (right[0] || '').localeCompare(left[0] || '');
+      });
+
+      const [topTarget, topCount] = rankedTargets[0] || [];
+      const secondCount = rankedTargets[1]?.[1] || 0;
+
+      if (!topTarget || topCount < 2) return acc;
+      if (secondCount > 0 && topCount < Math.max(secondCount + 1, 3)) return acc;
+
+      acc.push({ source, target: topTarget });
+      return acc;
+    }, []);
+  };
+
+  const mergeStableNamesIntoRollingGlossary = (tabId) => {
+    if (!tabId) return;
+
+    setRollingGlossaryForTab(tabId, (prev) => {
+      const existingTerms = [...glossary, ...prev];
+      const additions = extractStableNamePairs(tabId, existingTerms);
+
+      if (additions.length === 0) {
+        return prev;
+      }
+
+      const merged = [...prev];
+      additions.forEach((term) => {
+        if (!merged.some((item) => item.source === term.source)) {
+          merged.push(term);
+        }
+      });
+
+      return merged.slice(-100);
+    });
+  };
+
+  const extractLikelyHfSpaceNameCandidates = (sourceText = '', existingSources = new Set(), maxCandidates = 8) => {
+    if (!sourceText || maxCandidates <= 0) return [];
+
+    const sourceStopTerms = new Set([
+      '我们', '你们', '他们', '她们', '这里', '那里', '现在', '刚才', '时候', '事情', '东西', '自己',
+      '老师', '师父', '师尊', '师兄', '师姐', '师弟', '师妹', '父亲', '母亲', '爷爷', '奶奶', '哥哥', '姐姐',
+      '弟弟', '妹妹', '小姐', '公子', '夫人', '先生', '大人', '殿下', '陛下', '前辈', '后辈', '长老', '宗主',
+      '门主', '城主', '掌柜', '小二', '老板', '老夫', '老朽', '本王', '本座', '本尊', '本帝', '本皇',
+      '什么', '怎么', '为何', '为什么', '不是', '不能', '不会', '没有', '可以', '已经', '然后', '如果',
+      '但是', '就是', '还是', '只是', '如此', '这么', '那么', '这个', '那个', '这些', '那些'
+    ]);
+    const nameContextNext = /[说道问答喊叫看听想望向对跟和被让带拉扶救追等站坐走来去笑哭怒哼点摇皱挑抬低望冲飞落停]/;
+    const punctuationBoundary = /[\s"'“”‘’()（）《》〈〉【】「」『』,，。！？!?:：;；]/;
+    const seen = new Map();
+    const matches = [...sourceText.matchAll(/[\u4e00-\u9fff]{2,4}/g)];
+
+    matches.forEach((match) => {
+      const candidate = match[0];
+      const index = match.index || 0;
+      if (!candidate || sourceStopTerms.has(candidate) || existingSources.has(candidate)) return;
+
+      const prevChar = index > 0 ? sourceText[index - 1] : '';
+      const nextChar = sourceText[index + candidate.length] || '';
+      let score = 1;
+
+      if (!prevChar || punctuationBoundary.test(prevChar)) score += 1;
+      if (!nextChar || punctuationBoundary.test(nextChar)) score += 1;
+      if (nameContextNext.test(nextChar)) score += 2;
+
+      const current = seen.get(candidate) || { count: 0, score: 0, firstIndex: index };
+      current.count += 1;
+      current.score += score;
+      seen.set(candidate, current);
+    });
+
+    return Array.from(seen.entries())
+      .sort((left, right) => {
+        if ((right[1].score || 0) !== (left[1].score || 0)) return (right[1].score || 0) - (left[1].score || 0);
+        if ((right[1].count || 0) !== (left[1].count || 0)) return (right[1].count || 0) - (left[1].count || 0);
+        return (left[1].firstIndex || 0) - (right[1].firstIndex || 0);
+      })
+      .slice(0, maxCandidates)
+      .map(([candidate]) => candidate);
+  };
+
+  const looksLikeHfSpaceNameTarget = (target = '') => {
+    const trimmed = (target || '').trim();
+    if (!trimmed || trimmed.length > 40) return false;
+    if (/[\u4e00-\u9fff0-9]/.test(trimmed)) return false;
+    if (/[,:;!?."“”‘’]/.test(trimmed)) return false;
+    if (!/^\p{Lu}[\p{L}\p{M}'-]*(?:\s+[\p{L}\p{M}'-]+){0,3}$/u.test(trimmed)) return false;
+
+    const bannedTargets = new Set([
+      'Chung ta', 'Chúng ta', 'Ta', 'Ngươi', 'Ngươi ta', 'Không', 'Đừng', 'Lão sư', 'Sư phụ',
+      'Tiên sinh', 'Phụ thân', 'Mẫu thân', 'Ca ca', 'Tỷ tỷ', 'Đệ đệ', 'Muội muội'
+    ]);
+
+    return !bannedTargets.has(trimmed);
+  };
+
+  const fetchHfSpaceNameGlossary = async (client, sourceText = '', tabId = activeTabIdRef.current, maxCandidates = 8) => {
+    if (!client || !sourceText || !tabId) return [];
+
+    const existingTerms = [...glossary, ...getRollingGlossaryForTab(tabId)];
+    const existingSources = new Set(
+      existingTerms
+        .map((term) => (term?.source || '').trim())
+        .filter(Boolean)
+    );
+    const cache = getHfSpaceNameCacheForTab(tabId);
+    const pendingCandidates = extractLikelyHfSpaceNameCandidates(sourceText, existingSources, maxCandidates)
+      .filter((candidate) => !(candidate in cache));
+
+    if (pendingCandidates.length === 0) return [];
+
+    const result = await client.predict('/translate', {
+      input_text: pendingCandidates.join('\n')
+    });
+    const rawOutput = Array.isArray(result?.data)
+      ? (result.data[0] || '')
+      : (typeof result === 'string' ? result : '');
+
+    const translatedLines = String(rawOutput || '').split('\n');
+    const cacheUpdates = {};
+    const additions = [];
+
+    pendingCandidates.forEach((source, index) => {
+      const target = (translatedLines[index] || '').trim();
+      if (looksLikeHfSpaceNameTarget(target)) {
+        additions.push({ source, target });
+        cacheUpdates[source] = target;
+      } else {
+        cacheUpdates[source] = null;
+      }
+    });
+
+    updateHfSpaceNameCacheForTab(tabId, cacheUpdates);
+
+    if (additions.length > 0) {
+      setRollingGlossaryForTab(tabId, (prev) => {
+        const merged = [...prev];
+        additions.forEach((term) => {
+          if (!merged.some((item) => item.source === term.source)) {
+            merged.push(term);
+          }
+        });
+        return merged.slice(-100);
+      });
+    }
+
+    return additions;
   };
 
   // Helper to parse glossary and clean text
@@ -356,7 +711,7 @@ export default function TranslationTool() {
 
       let token = seenNames.get(normalized);
       if (!token) {
-        token = `[[NAME_${String(tokenIndex).padStart(3, '0')}]]`;
+        token = `PN${String(tokenIndex).padStart(4, '0')}X`;
         seenNames.set(normalized, token);
         placeholderMap[token] = normalized;
         tokenIndex += 1;
@@ -383,8 +738,8 @@ export default function TranslationTool() {
       restored = restored.replace(new RegExp(escapeRegExp(token), 'g'), value);
     });
 
-    restored = restored.replace(/\[\[\s*NAME_(\d{3})\s*\]\]/g, (match, id) => {
-      const canonical = `[[NAME_${id}]]`;
+    restored = restored.replace(/PN\s*(\d{4})\s*X/gi, (match, id) => {
+      const canonical = `PN${id}X`;
       return placeholderMap[canonical] || match;
     });
 
@@ -396,12 +751,12 @@ export default function TranslationTool() {
     return restoreProtectedNames(glossaryCleaned, preprocessMeta?.placeholderMap);
   };
 
-  const buildTermProtectionPayload = (sourceText = '') => {
+  const buildTermProtectionPayload = (sourceText = '', tabId = activeTabIdRef.current, extraTerms = []) => {
     if (!sourceText) {
       return { processedText: sourceText, tokenToTarget: {} };
     }
 
-    const mergedTerms = [...glossary, ...rollingGlossary];
+    const mergedTerms = [...glossary, ...getRollingGlossaryForTab(tabId), ...extraTerms];
     if (!mergedTerms.length) {
       return { processedText: sourceText, tokenToTarget: {} };
     }
@@ -470,39 +825,12 @@ export default function TranslationTool() {
     return client;
   };
 
-  // Extract character names from translation for rolling glossary (token-efficient)
-  // This replaces expensive text overlap while maintaining name consistency
-  // Extract source/target name pairs to keep naming consistent across chunks
-  const extractNamesFromTranslation = useCallback((originalText, translatedText) => {
-    const newNames = [];
-
-    const sourceNamePattern = /[\u4e00-\u9fff]{2,4}/g;
-    const sourceNames = [...new Set((originalText.match(sourceNamePattern) || []))];
-
-    const targetNamePattern = /\b\p{Lu}[\p{L}\p{M}'-]*(?:\s+\p{Lu}[\p{L}\p{M}'-]*){0,2}\b/gu;
-    const targetNames = [...new Set((translatedText.match(targetNamePattern) || []))];
-
-    const stopWords = new Set(['The', 'This', 'That', 'With', 'From', 'When', 'Then', 'After', 'Before', 'And', 'But']);
-    const filteredTargets = targetNames.filter((name) => (
-      !stopWords.has(name) &&
-      !rollingGlossary.some((item) => item.target === name)
-    ));
-
-    sourceNames.slice(0, 10).forEach((sourceName, index) => {
-      const targetName = filteredTargets[index];
-      if (targetName && !rollingGlossary.some((item) => item.source === sourceName)) {
-        newNames.push({ source: sourceName, target: targetName });
-      }
-    });
-
-    return newNames;
-  }, [rollingGlossary]);
-
   // Build context from rolling glossary (much cheaper than full text overlap)
-  const buildGlossaryContext = useCallback(() => {
-    if (rollingGlossary.length === 0 && glossary.length === 0) return '';
+  const buildGlossaryContext = useCallback((tabId = activeTabIdRef.current, maxTerms = 50) => {
+    const tabRollingGlossary = getRollingGlossaryForTab(tabId);
+    if (tabRollingGlossary.length === 0 && glossary.length === 0) return '';
 
-    const allTerms = [...glossary, ...rollingGlossary];
+    const allTerms = [...glossary, ...tabRollingGlossary];
     if (allTerms.length === 0) return '';
 
     // Only send unique, most recent terms (limit to save tokens)
@@ -511,10 +839,99 @@ export default function TranslationTool() {
         acc.push(term);
       }
       return acc;
-    }, []).slice(-50); // Keep last 50 terms max
+    }, []).slice(-Math.max(1, maxTerms));
 
     return uniqueTerms.map(t => `${t.source} = ${t.target}`).join(', ');
-  }, [rollingGlossary, glossary]);
+  }, [glossary, getRollingGlossaryForTab]);
+
+  const resolveTranslationSourceLanguage = (sourceText = '') => {
+    if (language && language !== 'Auto-detect') {
+      return language;
+    }
+
+    return detectLanguage(sourceText);
+  };
+
+  const buildHfTranslationParameters = (selectedModel, sourceText = '') => {
+    const parameters = {
+      generate_parameters: {
+        do_sample: false,
+        num_beams: 4
+      }
+    };
+
+    if (!/^facebook\/nllb-200/i.test(selectedModel || '')) {
+      return parameters;
+    }
+
+    const resolvedLanguage = resolveTranslationSourceLanguage(sourceText);
+    const sourceLangMap = {
+      'Chinese (\u4e2d\u6587)': 'zho_Hans',
+      'Japanese (\u65e5\u672c\u8a9e)': 'jpn_Jpan',
+      'Korean (\ud55c\uad6d\uc5b4)': 'kor_Hang',
+      'Vietnamese (Ti\u1ebfng Vi\u1ec7t)': 'vie_Latn',
+      'Russian (\u0420\u0443\u0441\u0441\u043a\u0438\u0439)': 'rus_Cyrl',
+      English: 'eng_Latn'
+    };
+
+    const srcLang = sourceLangMap[resolvedLanguage] || null;
+    if (srcLang) {
+      parameters.src_lang = srcLang;
+    }
+    parameters.tgt_lang = 'vie_Latn';
+
+    return parameters;
+  };
+
+  const replaceStandalonePhrase = (text = '', phrase = '', replacement = '') => {
+    if (!text || !phrase || !replacement || phrase === replacement) {
+      return text;
+    }
+
+    const pattern = new RegExp(`(^|[^\\p{L}\\p{M}])(${escapeRegExp(phrase)})(?=$|[^\\p{L}\\p{M}])`, 'gu');
+    return text.replace(pattern, (match, prefix) => `${prefix}${replacement}`);
+  };
+
+  const normalizePolishedText = (text = '') => text
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/([([{"])\s+/g, '$1')
+    .replace(/\s+([)\]}"])/g, '$1')
+    .trim();
+
+  const polishTranslatedDocument = (translatedText = '', tabId = activeTabIdRef.current) => {
+    if (!translatedText) return translatedText;
+
+    const canonicalBySource = new Map();
+    [...glossary, ...getRollingGlossaryForTab(tabId)].forEach((term) => {
+      const source = (term?.source || '').trim();
+      const target = (term?.target || '').trim();
+      if (!source || !target || canonicalBySource.has(source)) return;
+      canonicalBySource.set(source, target);
+    });
+
+    extractStableNamePairs(tabId, [...glossary, ...getRollingGlossaryForTab(tabId)]).forEach((term) => {
+      if (!canonicalBySource.has(term.source)) {
+        canonicalBySource.set(term.source, term.target);
+      }
+    });
+
+    let polished = translatedText;
+
+    Object.entries(getNameAlignmentVotesForTab(tabId)).forEach(([source, targets]) => {
+      const canonicalTarget = canonicalBySource.get(source);
+      if (!canonicalTarget) return;
+
+      Object.keys(targets || {})
+        .sort((left, right) => right.length - left.length)
+        .forEach((alias) => {
+          polished = replaceStandalonePhrase(polished, alias, canonicalTarget);
+        });
+    });
+
+    return normalizePolishedText(polished);
+  };
 
   const addTab = () => {
     const randomId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -552,6 +969,17 @@ export default function TranslationTool() {
 
     const newTabs = tabs.filter(t => t.id !== id);
     setTabs(newTabs);
+    setRollingGlossaryByTab((prev) => {
+      const { [id]: _removed, ...rest } = prev;
+      return rest;
+    });
+    delete pendingUpdatesRef.current[id];
+    delete tabErrorStateRef.current[id];
+    clearSessionForTab(id);
+    clearAbortControllerForTab(id);
+    clearNameAlignmentVotesForTab(id);
+    clearHfSpaceNameCacheForTab(id);
+    setTabTranslatingRuntime(id, false);
     if (activeTabId === id) {
       setActiveTabId(newTabs[newTabs.length - 1].id);
     }
@@ -607,19 +1035,25 @@ export default function TranslationTool() {
       sourceFocus: createSourceFocusState(),
       chunkIssue: createChunkIssueState()
     });
+    setRollingGlossaryForTab(activeTabIdRef.current, []);
+    clearNameAlignmentVotesForTab(activeTabIdRef.current);
+    clearHfSpaceNameCacheForTab(activeTabIdRef.current);
+    resetTabErrorState(activeTabIdRef.current);
+    clearSessionForTab(activeTabIdRef.current);
     setGlossary([]); // Global glossary clear? Or maybe keep it? User asked to clear all.
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const stopTranslation = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+  const stopTranslation = (targetTabId = activeTabIdRef.current) => {
+    const sessionTabId = targetTabId || activeTabIdRef.current;
+    const controller = getAbortControllerForTab(sessionTabId);
+    if (controller) {
+      controller.abort();
+      clearAbortControllerForTab(sessionTabId);
     }
-    isTranslatingRef.current = false;
+    setTabTranslatingRuntime(sessionTabId, false);
 
-    const session = translationSessionRef.current;
-    const sessionTabId = session.tabId || activeTabIdRef.current;
+    const session = getSessionForTab(sessionTabId);
     const stopResume = createResumeState({
       mode: session.mode || 'all',
       chapterIndex: Math.max(0, session.currentIndex || 0),
@@ -952,9 +1386,19 @@ export default function TranslationTool() {
     });
   };
 
-  const callAPI = async (text, onChunk = null, stream = true, previousContext = null, preprocessMeta = null) => {
+  const callAPI = async (
+    text,
+    onChunk = null,
+    stream = true,
+    previousContext = null,
+    preprocessMeta = null,
+    targetTabId = activeTabIdRef.current
+  ) => {
+    const tabId = targetTabId || activeTabIdRef.current;
     const provider = apiProviders[apiProvider];
     const modelValue = String(model || '');
+    const isGrok = apiProvider === 'grok';
+    const useGrokCostSaver = isGrok;
     const isPublicHfSpaceModel = apiProvider === 'huggingface' && (
       modelValue.startsWith('space:') ||
       modelValue.includes('doof-ferb/hirashiba-mt-zh-vi')
@@ -964,45 +1408,63 @@ export default function TranslationTool() {
       throw new Error('Please enter your API key');
     }
 
-    // Abort controller
-    abortControllerRef.current = new AbortController();
-    const signal = abortControllerRef.current.signal;
+    // Abort controller (tab-scoped for concurrent translations)
+    const controller = new AbortController();
+    setAbortControllerForTab(tabId, controller);
+    const signal = controller.signal;
     const prepared = preprocessMeta || preprocessTextForTranslation(text);
     const textForModel = prepared.processedText || text;
 
     // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ PROMPT CONSTRUCTION ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     let finalPrompt = customPrompt;
 
-    finalPrompt += '\n\nIMPORTANT: This is part of a larger text. Keep style and terminology consistent. Output translation only.';
-    finalPrompt += '\n\nNAME RULES: 1) Keep English/Latin names exactly unchanged. 2) Romanize non-Latin names (Chinese/Japanese/Korean). 3) Keep romanization consistent.';
+    finalPrompt += useGrokCostSaver
+      ? '\n\nKeep style and terminology consistent. Output translated text only.'
+      : '\n\nIMPORTANT: This is part of a larger text. Keep style and terminology consistent. Output translation only.';
+    finalPrompt += useGrokCostSaver
+      ? '\n\nNAME RULES: Keep English/Latin names unchanged. Romanize CJK names and keep romanization consistent.'
+      : '\n\nNAME RULES: 1) Keep English/Latin names exactly unchanged. 2) Romanize non-Latin names (Chinese/Japanese/Korean). 3) Keep romanization consistent.';
+    const protectedTokenList = (prepared.protectedTokens || []).slice(0, useGrokCostSaver ? 20 : 80);
+    const nonLatinCandidateList = (prepared.nonLatinCandidates || []).slice(0, useGrokCostSaver ? 12 : 40);
+    const glossaryContext = enableContextMemory
+      ? buildGlossaryContext(tabId, useGrokCostSaver ? 24 : 50)
+      : '';
+    const clippedContext = previousContext
+      ? previousContext.slice(-Math.max(120, useGrokCostSaver ? Math.min(240, contextMemorySize) : contextMemorySize))
+      : '';
+    const shouldIncludePreviousContext = !!clippedContext
+      && enableContextMemory
+      && (!useGrokCostSaver || !glossaryContext);
 
-    if (prepared.protectedTokens?.length) {
-      finalPrompt += `\n\nPROTECTED NAME TOKENS:\n${prepared.protectedTokens.map(token => `- ${token}`).join('\n')}\nKeep these tokens exactly unchanged in output.`;
+    if (protectedTokenList.length > 0) {
+      finalPrompt += `\n\nPROTECTED NAME TOKENS:\n${protectedTokenList.map(token => `- ${token}`).join('\n')}\nKeep these tokens exactly unchanged in output.`;
     }
 
-    if (prepared.nonLatinCandidates?.length) {
-      finalPrompt += `\n\nPOSSIBLE NON-LATIN NAMES TO ROMANIZE:\n${prepared.nonLatinCandidates.map(name => `- ${name}`).join('\n')}`;
+    if (nonLatinCandidateList.length > 0) {
+      finalPrompt += `\n\nPOSSIBLE NON-LATIN NAMES TO ROMANIZE:\n${nonLatinCandidateList.map(name => `- ${name}`).join('\n')}`;
     }
 
-    // Use lightweight glossary context instead of full text (saves ~80% tokens)
-    const glossaryContext = buildGlossaryContext();
-    if (glossaryContext && enableContextMemory) {
-      finalPrompt += `\n\nCHARACTER/TERM NAMES (MUST use these exact translations):\n${glossaryContext}\n\nIMPORTANT: You MUST use the exact name translations listed above. Do NOT create alternative translations for the same characters.`;
+    if (glossaryContext) {
+      finalPrompt += useGrokCostSaver
+        ? `\n\nCONSISTENCY GLOSSARY (use exact targets):\n${glossaryContext}`
+        : `\n\nCHARACTER/TERM NAMES (MUST use these exact translations):\n${glossaryContext}\n\nIMPORTANT: You MUST use the exact name translations listed above. Do NOT create alternative translations for the same characters.`;
     }
 
-    if (previousContext && enableContextMemory) {
-      // Fallback to old method if no glossary built yet (first chunk only)
-      finalPrompt += `\n\nPREVIOUS CONTEXT (For continuity of names and style):\n${previousContext}\n\nEND OF CONTEXT\n\nIMPORTANT: You must maintain strict consistency with the names used in the PREVIOUS CONTEXT. If a character was called "TiÃƒÂ¡Ã‚Â»Ã†â€™u Lam" previously, do NOT switch to "Xiao Lan". Use the same naming convention.`;
+    if (shouldIncludePreviousContext) {
+      finalPrompt += useGrokCostSaver
+        ? `\n\nPREVIOUS STYLE CONTEXT:\n${clippedContext}`
+        : `\n\nPREVIOUS CONTEXT (For continuity of names and style):\n${clippedContext}\n\nEND OF CONTEXT\n\nIMPORTANT: You must maintain strict consistency with the names used in the PREVIOUS CONTEXT. If a character was called "Tieu Lam" previously, do NOT switch to "Xiao Lan". Use the same naming convention.`;
     }
 
     if (glossary.length > 0) {
+      const strictGlossary = useGrokCostSaver ? glossary.slice(-20) : glossary;
       finalPrompt += '\n\nGlossary (Strictly follow these translations):\n';
-      glossary.forEach(term => {
+      strictGlossary.forEach(term => {
         finalPrompt += `- ${term.source} -> ${term.target}\n`;
       });
     }
 
-    if (autoGlossary) {
+    if (autoGlossary && !useGrokCostSaver) {
       finalPrompt += '\n\nAt the very end of your response, output a separator line "---GLOSSARY---" followed by a list of any NEW proper names or specific terms you identified and translated in this text, one per line in this format: "Source: Target". Do not include terms already in the provided glossary.';
     }
 
@@ -1057,7 +1519,8 @@ export default function TranslationTool() {
       if (isSpaceModel) {
         const spaceId = selectedModel.startsWith('space:') ? selectedModel.replace(/^space:/, '') : selectedModel;
         const client = await getHfSpaceClient(spaceId, apiKey);
-        const termProtection = buildTermProtectionPayload(textForModel);
+        const resolvedNameTerms = await fetchHfSpaceNameGlossary(client, text, tabId, 8);
+        const termProtection = buildTermProtectionPayload(textForModel, tabId, resolvedNameTerms);
 
         const result = await client.predict('/translate', {
           input_text: termProtection.processedText
@@ -1079,8 +1542,9 @@ export default function TranslationTool() {
       // Generic Hugging Face Inference API using HfInference
       const { HfInference } = await import('https://esm.sh/@huggingface/inference');
       const hf = new HfInference(apiKey);
-      const termProtection = buildTermProtectionPayload(textForModel);
+      const termProtection = buildTermProtectionPayload(textForModel, tabId);
       const protectedInput = termProtection.processedText;
+      const hfTranslationParameters = buildHfTranslationParameters(selectedModel, text);
 
       const MAX_CHUNK_SIZE = 700;
       let chunks = [];
@@ -1115,7 +1579,8 @@ export default function TranslationTool() {
         try {
           const result = await hf.translation({
             model: selectedModel,
-            inputs: chunk
+            inputs: chunk,
+            ...hfTranslationParameters
           });
 
           if (Array.isArray(result)) {
@@ -1124,15 +1589,21 @@ export default function TranslationTool() {
             chunkResult = result.translation_text || result.generated_text || JSON.stringify(result);
           }
         } catch (err) {
-          if (err.message.includes('Task not supported') || err.message.includes('does not support')) {
+          const errorMessage = err?.message || '';
+          if (errorMessage.includes('Task not supported') || errorMessage.includes('does not support')) {
+            const fallbackInput = `${finalPrompt}\n\nText to translate:\n${chunk}\n\nVietnamese translation:`;
             const result = await hf.textGeneration({
               model: selectedModel,
-              inputs: chunk,
-              parameters: { max_new_tokens: 1024 }
+              inputs: fallbackInput,
+              parameters: {
+                max_new_tokens: 1024,
+                temperature: 0.1,
+                return_full_text: false
+              }
             });
             chunkResult = result.generated_text || '';
-            if (chunkResult.startsWith(chunk)) {
-              chunkResult = chunkResult.slice(chunk.length).trim();
+            if (chunkResult.startsWith(fallbackInput)) {
+              chunkResult = chunkResult.slice(fallbackInput.length).trim();
             }
           } else {
             throw err;
@@ -1320,14 +1791,13 @@ export default function TranslationTool() {
 
       // Simulate streaming for UX
       if (onChunk && fullText) {
-        await simulateStreaming(fullText, onChunk, signal);
+        await simulateStreaming(fullText, onChunk, signal, tabId);
       }
 
       return finalizeTranslationOutput(fullText, prepared);
     }
 
     // GROK + OPENAI + GROQ + OPENROUTER + LOCAL
-    const isGrok = apiProvider === 'grok';
     const bodyData = {
       model: model,
       messages: (apiProvider === 'local') ? [
@@ -1336,8 +1806,8 @@ export default function TranslationTool() {
         { role: 'system', content: finalPrompt },
         { role: 'user', content: `Text to translate:\n${textForModel}` }
       ],
-      max_tokens: 8192,
-      temperature: 0.3,
+      max_tokens: isGrok ? 4096 : 8192,
+      temperature: isGrok ? 0.15 : 0.3,
       stream: stream,
       // Local model safeguards to reduce repetition
       ...(apiProvider === 'local' && {
@@ -1350,7 +1820,7 @@ export default function TranslationTool() {
       // Grok-specific options
       ...(isGrok && {
         // Cache prompt to reduce repeated input cost across chunks
-        cache_prompt: enableContextMemory === true,
+        cache_prompt: true,
 
         // Auto extract glossary bÃƒÂ¡Ã‚ÂºÃ‚Â±ng tool calls -> DISABLED to prevent truncation bug
         // We rely on text-based glossary extraction instead
@@ -1489,25 +1959,22 @@ export default function TranslationTool() {
   };
 
   // Helper for simulated streaming (visibility-aware to prevent background throttling)
-  const simulateStreaming = async (fullText, onChunk, signal) => {
+  const simulateStreaming = async (fullText, onChunk, signal, tabId = activeTabIdRef.current) => {
     const chunkSize = 5; // Words per chunk
     const words = fullText.split(' ');
 
     for (let i = 0; i < words.length; i += chunkSize) {
-      if (signal.aborted || !isTranslatingRef.current) break;
+      if (signal.aborted || !isTabTranslatingRuntime(tabId)) break;
 
       const chunk = words.slice(i, i + chunkSize).join(' ') + ' ';
 
       // If tab is hidden, queue the update to be processed when visible
       if (document.hidden) {
-        pendingUpdatesRef.current.push(() => onChunk(chunk));
+        queuePendingUpdate(tabId, () => onChunk(chunk));
         // No delay when hidden - just queue and continue
       } else {
         // Process any pending updates first
-        if (pendingUpdatesRef.current.length > 0) {
-          pendingUpdatesRef.current.forEach(update => update());
-          pendingUpdatesRef.current = [];
-        }
+        flushPendingUpdatesForTab(tabId);
         onChunk(chunk);
 
         // Variable delay to feel more natural (only when visible)
@@ -1517,10 +1984,7 @@ export default function TranslationTool() {
     }
 
     // Ensure any remaining pending updates are flushed
-    if (pendingUpdatesRef.current.length > 0) {
-      pendingUpdatesRef.current.forEach(update => update());
-      pendingUpdatesRef.current = [];
-    }
+    flushPendingUpdatesForTab(tabId);
   };
 
   // Helper to split text into chunks
@@ -1719,15 +2183,15 @@ export default function TranslationTool() {
     argRangeStart = 0,
     argRangeEnd = 0,
     argChunkIndex = 0,
-    targetTabId = activeTabIdRef.current
+    targetTabId = activeTabIdRef.current,
+    retryInvocation = false
   ) => {
     const tabId = targetTabId || activeTabIdRef.current;
     const tabSnapshot = getTabById(tabId);
-
     if (!tabSnapshot) return;
 
-    if (isTranslatingRef.current && translationSessionRef.current.tabId && translationSessionRef.current.tabId !== tabId) {
-      alert('Another tab is currently translating. Stop it before starting translation in this tab.');
+    if (!retryInvocation && isTabTranslatingRuntime(tabId)) {
+      alert('This tab is already translating.');
       return;
     }
 
@@ -1769,17 +2233,19 @@ export default function TranslationTool() {
     const sessionMode = mode === 'next' ? 'all' : mode;
     const totalWorkChapters = Math.max(1, endAt - startFrom);
 
-    translationSessionRef.current = {
+    setSessionForTab(tabId, createTranslationSessionState({
       tabId,
       mode: sessionMode,
       currentIndex: startFrom,
       currentChunkIndex: chunkStartIndex,
       rangeStart: startRange,
       rangeEnd: endRange
-    };
+    }));
 
     if (sessionMode === 'all' && startFrom === 0 && chunkStartIndex === 0) {
-      setRollingGlossary([]);
+      setRollingGlossaryForTab(tabId, []);
+      clearNameAlignmentVotesForTab(tabId);
+      clearHfSpaceNameCacheForTab(tabId);
     }
 
     updateTab(tabId, (t) => ({
@@ -1802,7 +2268,7 @@ export default function TranslationTool() {
       }
     }));
 
-    isTranslatingRef.current = true;
+    setTabTranslatingRuntime(tabId, true);
 
     let previousContext = '';
     if (enableContextMemory && tabSnapshot.outputText) {
@@ -1814,7 +2280,7 @@ export default function TranslationTool() {
 
     try {
       for (let i = startFrom; i < endAt; i++) {
-        if (!isTranslatingRef.current) break;
+        if (!isTabTranslatingRuntime(tabId)) break;
 
         const liveTab = getTabById(tabId);
         if (!liveTab) break;
@@ -1839,13 +2305,16 @@ export default function TranslationTool() {
         let chapterOutput = '';
 
         for (let j = startChunk; j < chunkSpans.length; j++) {
-          if (!isTranslatingRef.current) break;
+          if (!isTabTranslatingRuntime(tabId)) break;
 
           const chunkContent = chunkSpans[j].content;
           const preprocessMeta = preprocessTextForTranslation(chunkContent);
 
-          translationSessionRef.current.currentIndex = i;
-          translationSessionRef.current.currentChunkIndex = j;
+          setSessionForTab(tabId, (session) => ({
+            ...session,
+            currentIndex: i,
+            currentChunkIndex: j
+          }));
 
           updateTab(tabId, (t) => ({
             ...t,
@@ -1884,27 +2353,45 @@ export default function TranslationTool() {
           let chunkTranslation = '';
 
           if (shouldStream) {
-            chunkTranslation = await callAPI(chunkContent, (chunkText) => {
-              updateChunkProgress(chunkText);
-              updateTab(tabId, (t) => ({
-                ...t,
-                streamingText: (t.streamingText || '') + chunkText
-              }));
-              scrollToBottom(tabId);
-            }, true, previousContext, preprocessMeta);
+            chunkTranslation = await callAPI(
+              chunkContent,
+              (chunkText) => {
+                updateChunkProgress(chunkText);
+                updateTab(tabId, (t) => ({
+                  ...t,
+                  streamingText: (t.streamingText || '') + chunkText
+                }));
+                scrollToBottom(tabId);
+              },
+              true,
+              previousContext,
+              preprocessMeta,
+              tabId
+            );
           } else {
-            chunkTranslation = await callAPI(chunkContent, null, false, previousContext, preprocessMeta);
-            await simulateStreaming(chunkTranslation, (chunkText) => {
-              updateChunkProgress(chunkText);
-              updateTab(tabId, (t) => ({
-                ...t,
-                streamingText: (t.streamingText || '') + chunkText
-              }));
-              scrollToBottom(tabId);
-            }, abortControllerRef.current.signal);
+            chunkTranslation = await callAPI(chunkContent, null, false, previousContext, preprocessMeta, tabId);
+            const streamSignal = getAbortControllerForTab(tabId)?.signal || { aborted: false };
+            await simulateStreaming(
+              chunkTranslation,
+              (chunkText) => {
+                updateChunkProgress(chunkText);
+                updateTab(tabId, (t) => ({
+                  ...t,
+                  streamingText: (t.streamingText || '') + chunkText
+                }));
+                scrollToBottom(tabId);
+              },
+              streamSignal,
+              tabId
+            );
           }
 
           chapterOutput += chunkTranslation;
+          if ((enableContextMemory || apiProvider === 'huggingface') && chunkTranslation) {
+            recordNameAlignmentVotesForTab(tabId, chunkContent, chunkTranslation);
+            mergeStableNamesIntoRollingGlossary(tabId);
+            previousContext = chapterOutput.slice(-contextMemorySize);
+          }
 
           updateTab(tabId, (t) => {
             const nextOutput = isLong ? (t.outputText || '') : `${t.outputText || ''}${chunkTranslation}`;
@@ -1926,25 +2413,17 @@ export default function TranslationTool() {
             };
           });
 
-          translationSessionRef.current.currentChunkIndex = j + 1;
+          setSessionForTab(tabId, (session) => ({
+            ...session,
+            currentChunkIndex: j + 1
+          }));
           scrollToBottom(tabId);
         }
 
-        if (!isTranslatingRef.current) break;
+        if (!isTabTranslatingRuntime(tabId)) break;
 
         if ((enableContextMemory || apiProvider === 'huggingface') && chapterOutput) {
-          const newNames = extractNamesFromTranslation(chapter.content, chapterOutput);
-          if (newNames.length > 0) {
-            setRollingGlossary((prev) => {
-              const updated = [...prev];
-              newNames.forEach((name) => {
-                if (!updated.some((item) => item.source === name.source)) {
-                  updated.push(name);
-                }
-              });
-              return updated.slice(-100);
-            });
-          }
+          mergeStableNamesIntoRollingGlossary(tabId);
           previousContext = chapterOutput.slice(-contextMemorySize);
         }
 
@@ -1980,26 +2459,41 @@ export default function TranslationTool() {
           })
         }));
 
-        translationSessionRef.current.currentIndex = i + 1;
-        translationSessionRef.current.currentChunkIndex = 0;
-        consecutiveErrorsRef.current = 0;
-        lastErrorRef.current = '';
+        setSessionForTab(tabId, (session) => ({
+          ...session,
+          currentIndex: i + 1,
+          currentChunkIndex: 0
+        }));
+        resetTabErrorState(tabId);
       }
 
-      completed = isTranslatingRef.current && translationSessionRef.current.currentIndex >= endAt;
+      const finalSession = getSessionForTab(tabId);
+      completed = isTabTranslatingRuntime(tabId) && finalSession.currentIndex >= endAt;
       if (completed) {
-        updateTab(tabId, (t) => ({
-          ...t,
-          sourceFocus: createSourceFocusState(),
-          chunkIssue: createChunkIssueState(),
-          resume: createResumeState(),
-          progress: {
-            ...t.progress,
-            current: endAt,
-            total: totalWorkChapters,
-            percent: 100
-          }
-        }));
+        mergeStableNamesIntoRollingGlossary(tabId);
+        updateTab(tabId, (t) => {
+          const polishedOutput = autoPolishOutput ? polishTranslatedDocument(t.outputText || '', tabId) : (t.outputText || '');
+          const polishedTemp = autoPolishOutput && t.tempTranslation
+            ? polishTranslatedDocument(t.tempTranslation, tabId)
+            : t.tempTranslation;
+
+          return {
+            ...t,
+            outputText: polishedOutput,
+            tempTranslation: polishedTemp,
+            sourceFocus: createSourceFocusState(),
+            chunkIssue: createChunkIssueState(),
+            resume: createResumeState(),
+            progress: {
+              ...t.progress,
+              current: endAt,
+              total: totalWorkChapters,
+              percent: 100
+            }
+          };
+        });
+        clearSessionForTab(tabId);
+        resetTabErrorState(tabId);
       }
     } catch (error) {
       if (error.name !== 'AbortError' && !(error.message || '').includes('aborted')) {
@@ -2027,14 +2521,13 @@ export default function TranslationTool() {
         ].some((term) => normalizedError.includes(term));
         const isModerationBlock = isModerationBlockError(errorMsg) || looksLikePolicy403;
 
-        if (lastErrorRef.current === errorMsg) {
-          consecutiveErrorsRef.current += 1;
-        } else {
-          consecutiveErrorsRef.current = 1;
-          lastErrorRef.current = errorMsg;
-        }
+        const prevErrorState = getTabErrorState(tabId);
+        const nextErrorState = prevErrorState.last === errorMsg
+          ? { consecutive: prevErrorState.consecutive + 1, last: errorMsg }
+          : { consecutive: 1, last: errorMsg };
+        setTabErrorState(tabId, nextErrorState);
 
-        const canAutoRetry = autoContinueOnError && !isNonRetryable && consecutiveErrorsRef.current < MAX_CONSECUTIVE_ERRORS;
+        const canAutoRetry = autoContinueOnError && !isNonRetryable && nextErrorState.consecutive < MAX_CONSECUTIVE_ERRORS;
 
         updateTab(tabId, (t) => ({
           ...t,
@@ -2043,34 +2536,32 @@ export default function TranslationTool() {
         scrollToBottom(tabId);
 
         if (canAutoRetry) {
-          const retryDelay = Math.min(5000, 1000 * Math.pow(2, consecutiveErrorsRef.current - 1));
+          const retryDelay = Math.min(5000, 1000 * Math.pow(2, nextErrorState.consecutive - 1));
 
           updateTab(tabId, (t) => ({
             ...t,
-            outputText: `${t.outputText || ''}\nRetrying in ${retryDelay / 1000}s... (Attempt ${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_ERRORS})`
+            outputText: `${t.outputText || ''}\nRetrying in ${retryDelay / 1000}s... (Attempt ${nextErrorState.consecutive}/${MAX_CONSECUTIVE_ERRORS})`
           }));
 
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
 
-          if (autoContinueOnError) {
-            const session = translationSessionRef.current;
-            if (session.tabId === tabId) {
-              handedOffToRetry = true;
-              isTranslatingRef.current = true;
-              updateTab(tabId, { isTranslating: true });
-              translateText(
-                session.mode,
-                session.currentIndex,
-                session.rangeStart,
-                session.rangeEnd,
-                session.currentChunkIndex,
-                session.tabId
-              );
-              return;
-            }
+          if (autoContinueOnError && isTabTranslatingRuntime(tabId)) {
+            const session = getSessionForTab(tabId);
+            handedOffToRetry = true;
+            updateTab(tabId, { isTranslating: true });
+            translateText(
+              session.mode,
+              session.currentIndex,
+              session.rangeStart,
+              session.rangeEnd,
+              session.currentChunkIndex,
+              session.tabId,
+              true
+            );
+            return;
           }
         } else if (isNonRetryable) {
-          const session = translationSessionRef.current;
+          const session = getSessionForTab(tabId);
           const retryResume = createResumeState({
             mode: session.mode || sessionMode,
             chapterIndex: Math.max(0, session.currentIndex || 0),
@@ -2080,8 +2571,11 @@ export default function TranslationTool() {
             hasCheckpoint: true
           });
 
-          translationSessionRef.current.currentIndex = retryResume.chapterIndex;
-          translationSessionRef.current.currentChunkIndex = retryResume.chunkIndex;
+          setSessionForTab(tabId, (current) => ({
+            ...current,
+            currentIndex: retryResume.chapterIndex,
+            currentChunkIndex: retryResume.chunkIndex
+          }));
           const issueMessage = isModerationBlock
             ? 'Provider safety policy blocked this chunk. Retry this chunk or skip to the next chunk.'
             : 'This chunk failed and needs manual action. Retry this chunk or skip to the next chunk.';
@@ -2097,10 +2591,9 @@ export default function TranslationTool() {
           }));
           applyChunkFocus(tabId, retryResume, issueMessage, isModerationBlock);
 
-          consecutiveErrorsRef.current = 0;
-          lastErrorRef.current = '';
-        } else if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_ERRORS) {
-          const session = translationSessionRef.current;
+          resetTabErrorState(tabId);
+        } else if (nextErrorState.consecutive >= MAX_CONSECUTIVE_ERRORS) {
+          const session = getSessionForTab(tabId);
           const retryResume = createResumeState({
             mode: session.mode || sessionMode,
             chapterIndex: Math.max(0, session.currentIndex || 0),
@@ -2117,12 +2610,14 @@ export default function TranslationTool() {
             resume: retryResume
           }));
           applyChunkFocus(tabId, retryResume, pauseMessage);
-          consecutiveErrorsRef.current = 0;
-          lastErrorRef.current = '';
+          resetTabErrorState(tabId);
         }
       }
     } finally {
       if (!handedOffToRetry) {
+        setTabTranslatingRuntime(tabId, false);
+        clearAbortControllerForTab(tabId);
+        flushPendingUpdatesForTab(tabId);
         updateTab(tabId, (t) => ({
           ...t,
           isTranslating: false,
@@ -2154,6 +2649,11 @@ export default function TranslationTool() {
 
   const clearTranslation = () => {
     if (window.confirm('Are you sure you want to clear the translation output?')) {
+      setRollingGlossaryForTab(activeTabIdRef.current, []);
+      clearNameAlignmentVotesForTab(activeTabIdRef.current);
+      clearHfSpaceNameCacheForTab(activeTabIdRef.current);
+      resetTabErrorState(activeTabIdRef.current);
+      clearSessionForTab(activeTabIdRef.current);
       updateActiveTab({
         outputText: '',
         tempTranslation: '',
@@ -2217,6 +2717,21 @@ export default function TranslationTool() {
       nextResume.chunkIndex,
       activeTabId
     );
+  };
+
+  const handlePolishTranslation = (targetTabId = activeTabIdRef.current) => {
+    const tabId = targetTabId || activeTabIdRef.current;
+    const tab = getTabById(tabId);
+    if (!tab?.outputText?.trim()) return;
+
+    mergeStableNamesIntoRollingGlossary(tabId);
+    const polishedOutput = polishTranslatedDocument(tab.outputText, tabId);
+
+    updateTab(tabId, (current) => ({
+      ...current,
+      outputText: polishedOutput,
+      tempTranslation: current.tempTranslation ? polishTranslatedDocument(current.tempTranslation, tabId) : current.tempTranslation
+    }));
   };
 
   return (
@@ -2309,12 +2824,17 @@ export default function TranslationTool() {
             setRangeEnd={setRangeEnd}
             autoContinueOnError={autoContinueOnError}
             setAutoContinueOnError={setAutoContinueOnError}
+            onPolish={() => handlePolishTranslation(activeTabId)}
+            canPolish={!activeTab.isTranslating && !!(activeTab.outputText || '').trim()}
+            autoPolishOutput={autoPolishOutput}
+            setAutoPolishOutput={setAutoPolishOutput}
           />
         </main>
       </div>
     </div>
   );
 }
+
 
 
 

@@ -57,8 +57,8 @@ export const apiProviders = {
     grok: {
         name: 'xAI Grok',
         models: [
-            'grok-4-1-fast-reasoning',
             'grok-4-1-fast-non-reasoning',
+            'grok-4-1-fast-reasoning',
             'grok-4',
             'grok-3'
         ],

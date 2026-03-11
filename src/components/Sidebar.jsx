@@ -57,7 +57,7 @@ export default function Sidebar({
                                 value={apiProvider}
                                 onChange={(e) => {
                                     setApiProvider(e.target.value);
-                                    setModel(apiProviders[e.target.value].models[0]);
+                                    setModel(apiProviders[e.target.value].defaultModel || apiProviders[e.target.value].models[0]);
                                 }}
                                 className={fieldClass}
                             >
@@ -82,6 +82,16 @@ export default function Sidebar({
                                     </option>
                                 ))}
                             </select>
+                            {apiProvider === 'grok' && /reasoning/i.test(model) && (
+                                <p className="mt-1 text-xs text-amber-600 dark:text-amber-300">
+                                    Reasoning models cost more. Use `grok-4-1-fast-non-reasoning` for bulk translation.
+                                </p>
+                            )}
+                            {apiProvider === 'huggingface' && (
+                                <p className="mt-1 text-xs text-amber-600 dark:text-amber-300">
+                                    HF translation models rely more on glossary and post-polish than on the custom prompt. Use `Polish Output` after long runs to normalize names.
+                                </p>
+                            )}
                         </div>
 
                         {apiProviders[apiProvider]?.requiresKey !== false && (

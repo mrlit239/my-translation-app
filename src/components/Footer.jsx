@@ -1,5 +1,5 @@
 import React from 'react';
-import { BookOpen, FastForward, Play, RotateCcw, SkipForward, StopCircle } from 'lucide-react';
+import { BookOpen, FastForward, Play, RotateCcw, SkipForward, Sparkles, StopCircle } from 'lucide-react';
 
 export default function Footer({
     chapters,
@@ -20,7 +20,11 @@ export default function Footer({
     rangeEnd,
     setRangeEnd,
     autoContinueOnError,
-    setAutoContinueOnError
+    setAutoContinueOnError,
+    onPolish,
+    canPolish = false,
+    autoPolishOutput,
+    setAutoPolishOutput
 }) {
     return (
         <div className="border-t border-slate-200 bg-slate-50/90 px-5 py-3 dark:border-slate-800 dark:bg-slate-950/80">
@@ -131,6 +135,16 @@ export default function Footer({
                                 <BookOpen className="h-4 w-4" /> Translate All
                             </button>
 
+                            {canPolish && (
+                                <button
+                                    onClick={onPolish}
+                                    className="inline-flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-900/30 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+                                    title="Normalize names and spacing using the document-wide consistency map"
+                                >
+                                    <RotateCcw className="h-4 w-4" /> Polish Output
+                                </button>
+                            )}
+
                             <button
                                 onClick={() => setAutoContinueOnError(!autoContinueOnError)}
                                 className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition ${autoContinueOnError
@@ -140,6 +154,17 @@ export default function Footer({
                                 title="Automatically retry and continue translation when recoverable errors happen"
                             >
                                 <RotateCcw className="h-3.5 w-3.5" /> Auto-Continue
+                            </button>
+
+                            <button
+                                onClick={() => setAutoPolishOutput(!autoPolishOutput)}
+                                className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-medium transition ${autoPolishOutput
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-900/30 dark:text-emerald-300'
+                                    : 'border-slate-300 bg-white text-slate-500 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:bg-slate-800'
+                                    }`}
+                                title="Automatically polish translated output when the current translation run finishes"
+                            >
+                                <Sparkles className="h-3.5 w-3.5" /> Auto-Polish
                             </button>
                         </>
                     )}
