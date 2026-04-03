@@ -858,6 +858,30 @@ export default function TranslationTool() {
   }, [glossary, getRollingGlossaryForTab]);
 
   const GROK_RESCUE_SPLIT_SIZES = [1200, 700, 320];
+  const HAN_VIET_SUSPECT_PATTERNS = [
+    /\bđích\b/giu,
+    /\bthử\b/giu,
+    /\bna\b/giu,
+    /\bliễu\b/giu,
+    /\bhựu\b/giu,
+    /\bkhước\b/giu,
+    /\btựu\b/giu,
+    /\btiện\b/giu,
+    /\bđáo\b/giu,
+    /\bkhứ\b/giu,
+    /\bthuyết đạo\b/giu,
+    /\bkhán lai\b/giu,
+    /\bhảo tượng\b/giu,
+    /\bcương tài\b/giu,
+    /\bđốn thì\b/giu,
+    /\btại hạ\b/giu,
+    /\bnhất cá\b/giu,
+    /\bnhất vị\b/giu,
+    /\bmột cá\b/giu,
+    /\bvi thủ\b/giu,
+    /\bbất tri\b/giu,
+    /\btức tri\b/giu
+  ];
 
   const isLikelyProviderPolicy403 = (status, errorMessage = '') => {
     if (status !== 403) return false;
@@ -896,9 +920,11 @@ Rules:
 2. Do not add explanations, policy notes, warnings, or extra commentary.
 3. Do not leave any Chinese, Japanese, or Korean characters in the final output.
 4. Romanize proper names into Latin alphabet consistently.
-5. Translate every sentence fully. Do not summarize or omit content.
-6. Keep placeholder tokens such as PN0001X and TKN0001X exactly unchanged.
-7. Preserve paragraph breaks when possible.`;
+5. Do NOT transliterate whole Chinese sentences into Han-Viet reading. Words such as "đích", "chi", "nhi", "thử", "na", "liễu", "hựu" should normally not appear in the final narrative unless they are part of a fixed proper name or quoted title.
+6. Rewrite the text into natural, modern Vietnamese prose. Translate normal words and grammar fully instead of copying Sino-Vietnamese reading.
+7. Translate every sentence fully. Do not summarize or omit content.
+8. Keep placeholder tokens such as PN0001X and TKN0001X exactly unchanged.
+9. Preserve paragraph breaks when possible.`;
 
     if (protectedTokenList.length > 0) {
       prompt += `\n\nPROTECTED TOKENS:\n${protectedTokenList.map((token) => `- ${token}`).join('\n')}\nKeep these tokens exactly unchanged.`;
@@ -935,6 +961,79 @@ Rules:
     }
 
     return forcedChunks;
+  };
+
+  const getGrokTranslationQualityReport = (translatedText = '') => {
+    const cleanText = stripInternalStatusLines(translatedText || '').trim();
+    if (!cleanText) {
+      return {
+        hasCjk: false,
+        hasHanVietHeavy: false,
+        hasIssue: false,
+        cjkCount: 0,
+        markerCount: 0,
+        density: 0,
+        denseLineCount: 0
+      };
+    }
+
+    const cjkCount = ([...cleanText.matchAll(/[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/gu)] || []).length;
+    const markerCount = HAN_VIET_SUSPECT_PATTERNS.reduce(
+      (total, pattern) => total + ((cleanText.match(pattern) || []).length),
+      0
+    );
+    const wordCount = (cleanText.match(/\p{L}+/gu) || []).length;
+    const density = wordCount > 0 ? markerCount / wordCount : 0;
+    const denseLineCount = cleanText
+      .split(/\n+/)
+      .filter((line) => {
+        const lineHits = HAN_VIET_SUSPECT_PATTERNS.reduce(
+          (total, pattern) => total + ((line.match(pattern) || []).length),
+          0
+        );
+        return lineHits >= 4;
+      })
+      .length;
+    const hasHanVietHeavy = markerCount >= 12 || denseLineCount >= 2 || (markerCount >= 8 && density >= 0.028);
+
+    return {
+      hasCjk: cjkCount > 0,
+      hasHanVietHeavy,
+      hasIssue: cjkCount > 0 || hasHanVietHeavy,
+      cjkCount,
+      markerCount,
+      density,
+      denseLineCount
+    };
+  };
+
+  const maybeRescueGrokTranslationQuality = async ({
+    sourceText,
+    translatedText,
+    tabId = activeTabIdRef.current,
+    signal
+  }) => {
+    if (!sourceText || !translatedText || !/[\u4e00-\u9fff]/u.test(sourceText)) {
+      return translatedText;
+    }
+
+    const report = getGrokTranslationQualityReport(translatedText);
+    if (!report.hasIssue) {
+      return translatedText;
+    }
+
+    try {
+      return await translateBlockedGrokChunk({
+        sourceText,
+        tabId,
+        signal
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw error;
+      }
+      return translatedText;
+    }
   };
 
   const translateBlockedGrokChunk = async ({
@@ -2181,7 +2280,16 @@ Rules:
         }
       }
 
-      return finalizeTranslationOutput(streamedContent, prepared);
+      const finalizedStreamText = finalizeTranslationOutput(streamedContent, prepared);
+      if (isGrok) {
+        return await maybeRescueGrokTranslationQuality({
+          sourceText: text,
+          translatedText: finalizedStreamText,
+          tabId,
+          signal
+        });
+      }
+      return finalizedStreamText;
     }
 
     // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ NON-STREAM (fallback) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
@@ -2204,7 +2312,16 @@ Rules:
       }
     }
 
-    return finalizeTranslationOutput(data.choices?.[0]?.message?.content?.trim() || '', prepared);
+    const finalizedText = finalizeTranslationOutput(data.choices?.[0]?.message?.content?.trim() || '', prepared);
+    if (isGrok) {
+      return await maybeRescueGrokTranslationQuality({
+        sourceText: text,
+        translatedText: finalizedText,
+        tabId,
+        signal
+      });
+    }
+    return finalizedText;
   };
 
   // Helper for simulated streaming (visibility-aware to prevent background throttling)
